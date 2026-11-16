@@ -33,7 +33,7 @@ describe('Unity-compatible models', () => {
     expect(s.profile.avatarId).toBe('ae6a6b0db4994642a1b45102daa825bd');
     expect(s.progress).toMatchObject({ worldId: 'dunes', village: 1, facilityLevels: [1, 1, 1, 1, 1],
       worldRunId: 'legacy:dunes', highestUnlockedWorld: 0, distance: '0', constructionStars: '0' });
-    expect(s.wallet).toMatchObject({ energy: 200, diamond: 20000, yallaPoint: 0, energyRechargeAnchor: '0' });
+    expect(s.wallet).toMatchObject({ energy: 50, diamond: 0, yallaPoint: 0, energyRechargeAnchor: '0' });
   });
   it('preserves C# decimal precision and rejects overflow/numeric transport', () => {
     for (const value of ['0', '0.0000000000000000000000000001', '79228162514264337593543950335', '12345678901234567890.12345678'])
@@ -55,6 +55,15 @@ describe('Guest creation and recovery', () => {
     const first = await service.createGuest(principal), second = await service.createGuest(principal);
     expect(first.created).toBe(true); expect(second.created).toBe(false);
     expect(second.save).toEqual(first.save); expect(repository.create).toHaveBeenCalledTimes(1);
+  });
+  it('restores an existing above-cap wallet without applying the new initial grant', async () => {
+    const existing = save(); existing.wallet.energy = 200; existing.wallet.diamond = 20000;
+    const create = vi.fn(), makeSave = vi.fn(save);
+    const service = new PlayerService({ find: async () => existing.profile.playerId,
+      read: async () => existing, create }, makeSave);
+    expect(await service.createGuest(principal)).toEqual({ created: false, save: existing });
+    expect(create).not.toHaveBeenCalled(); expect(makeSave).not.toHaveBeenCalled();
+    expect(await service.read(principal)).toEqual(existing);
   });
   it('recovers the winning player under concurrent create requests', async () => {
     const service = new PlayerService(memory(), save);

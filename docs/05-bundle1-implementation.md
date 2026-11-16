@@ -8,7 +8,7 @@
 |---|---|---|
 | `Core/Data/RaidState.cs` → `PlayerProfile` | `PlayerId`, `Nickname=YOU`, `AvatarId=ae6a6b0db4994642a1b45102daa825bd`, `WorldId=dunes` | 서버 UUID `playerId`, 같은 nickname/avatar 기본값. World는 04에 따라 Progress만 소유 |
 | `YallaJourneyPlayerStore.Raid.cs` → `ProfileForUninitializedSave` | `local:SHA256(absolute SavePath)`를 Profile에 보관 | 경로 해시는 인증 자격이 아님. 서버 Player ID를 별도 보관하고 기존 ID는 향후 승인된 migration 출처로만 사용 |
-| `YallaJourneyPlayerData.cs` 생성자 | Energy 200, Diamond 20000, Gold 0. EnergyDrop 최초 YallaPoint 0 | Wallet Energy 200, Diamond 20000, YallaPoint 0. Gold·HyperBase 잔액은 합산하지 않음 |
+| `YallaJourneyPlayerData.cs` 생성자 | Energy 200, Diamond 20000, Gold 0. EnergyDrop 최초 YallaPoint 0 | 신규 서버 Guest는 정책 변경에 따라 Energy 50, Diamond 0, YallaPoint 0. 기존 데이터는 그대로 유지. Diamond 필드·응답은 보전하며 현재 사용하지 않음. Gold·HyperBase 잔액은 합산하지 않음 |
 | `MyShelterProgress.cs`, `MyShelterWorlds.cs` | Village 1, 시설 5개 level 1. World 7개: dunes/canyon/oasis/bazaar/palace/nightcity/goldentemple | 동일 기본값·범위. `Profile.WorldId` → `progress.worldId`; `ShelterProgress.CurrentVillage/Levels` → `village/facilityLevels` |
 | `YallaJourneyPlayerData.cs` World 메타데이터 | `WorldRunId=legacy:dunes`, 완료 false, counts={}, unlock index 0 | 기존 최초 run 값과 의미 보전. `schemaVersion`은 서버 스키마 버전이며 Unity의 `ProgressVersion=2`와 다른 개념 |
 | `CamelJourneyProgress.Value` | C# decimal 거리 0. `LastGrantSessionId/Round`는 제한적인 과거 중복 방지 | `progress.distance`는 decimal 문자열 전송·DynamoDB 정확한 Number 저장. 기존 grant 필드를 지급 권리로 신뢰하지 않음 |
@@ -54,7 +54,7 @@ Cognito의 기본 access/id token 유효기간(1시간), refresh token 유효기
 
 Save는 조회 projection이다. Unity의 전체 JSON을 업로드하는 Save/PUT endpoint를 만들지 않는다. 시설·거리·World 변경은 후속 서버 명령과 Economy 정산으로만 가능하다. 이번 Bundle에서는 초기 저장과 복원을 구현한다. 초기 지급을 제외한 재화 변경·충전·결과 정산·Session·Raid·Inventory·Collection·결제·광고 보상은 구현하지 않는다.
 
-정수 재화는 C# nonnegative int 범위를 지키며 거리와 long 필드는 JS float를 거치지 않는다. null/손상/불완전 상태는 신규 기본값으로 덮지 않고 오류를 반환한다. `migrationState=new`는 새 계정의 미이전 상태 표식이며 기존 유저 이전 완료를 의미하지 않는다. `starter-v1`은 04에서 확인한 초기 지급 구성을 고정한 기술 버전이다.
+정수 재화는 C# nonnegative int 범위를 지키며 거리와 long 필드는 JS float를 거치지 않는다. null/손상/불완전 상태는 신규 기본값으로 덮지 않고 오류를 반환한다. `migrationState=new`는 새 계정의 미이전 상태 표식이며 기존 유저 이전 완료를 의미하지 않는다. 이번 지급량 변경에서는 요청에 따라 영수증 `configVersion=starter-v1`을 유지한다. 실제 지급량은 영수증의 `deltas`, `balancesBefore/After`와 해당 값을 포함한 `requestHash`에 기록되므로 이전 지급 기록과 구분할 수 있다. 기존 영수증·원인 키·Wallet은 변경하지 않는다.
 
 ## 원자성·재시도·오류 복구
 

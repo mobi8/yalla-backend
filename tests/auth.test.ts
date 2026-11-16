@@ -86,7 +86,8 @@ describe('Initial Economy transaction', () => {
     const s = newSave(), p: Principal = { provider: 'guest', subject: `pool:${sub}` };
     const items = starterItems(s, p), receipt = items[1]!;
     expect(receipt).toMatchObject({ operationType: 'starter', causeKey: `starter#${s.profile.playerId}`,
-      balancesBefore: { energy: 0, diamond: 0, yallaPoint: 0 }, balancesAfter: { energy: 200, diamond: 20000, yallaPoint: 0 }, walletVersionAfter: 1 });
+      configVersion: 'starter-v1', deltas: { energy: 50, diamond: 0, yallaPoint: 0 },
+      balancesBefore: { energy: 0, diamond: 0, yallaPoint: 0 }, balancesAfter: { energy: 50, diamond: 0, yallaPoint: 0 }, walletVersionAfter: 1 });
     expect(items[2]).toMatchObject({ operationId: receipt.operationId, requestHash: receipt.requestHash });
     expect(items.some(i => 'ttl' in i)).toBe(false);
   });

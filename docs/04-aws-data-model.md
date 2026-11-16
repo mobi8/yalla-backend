@@ -30,7 +30,7 @@
 
 ### Wallet과 세션의 분리 원칙
 
-신규 유저는 확인된 현재 기준인 Energy 200, Diamond 20000, YallaPoint 0으로 시작한다. 기존 유저에게 이 초기값을 추가 지급하지 않는다. Energy 자연 충전은 cap 50, 10초당 3을 유지하며 보상·구매로 50을 넘은 잔액은 잘라내지 않는다. Diamond→Energy 교환은 기존 1:20과 20단위 구매를 유지한다.
+신규 Guest는 2026-11-16 정책 변경에 따라 Energy 50, Diamond 0, YallaPoint 0으로 시작한다. 기존 DynamoDB 데이터에는 변경·회수·추가 지급을 하지 않는다. Diamond 필드와 API 계약은 유지하되 현재 사용하지 않는다. Unity의 기존 초기값 Energy 200 / Diamond 20000은 과거 로컬 동작이며 신규 서버 지급에 적용하지 않는다. Energy 자연 충전은 cap 50, 10초당 3을 유지하며 보상·구매로 50을 넘은 잔액은 잘라내지 않는다. 기존 Diamond→Energy 1:20 및 20단위 구매 규칙은 참고 규칙으로 보전하며 이번 Bundle에서는 교환을 구현하지 않는다.
 
 기존 `EnergyDropSnapshot.ConfirmedYallaPoint`는 승인된 이전 절차에서 Wallet로 한 번 옮긴다. Session에는 현재 잔액의 쓰기 가능한 복제본을 두지 않는다. 기존 `SessionSnapshot`의 legacy 잔액과 합산하거나 새 세션을 열 때 tier 시작 재화를 지급하지 않는다. legacy 모드의 처리 정책은 아래 결정 사항으로 남긴다.
 

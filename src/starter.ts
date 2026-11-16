@@ -8,7 +8,7 @@ export function starterItems(save: Save, principal: Principal) {
   const operationId = `starter#${profile.playerId}`, causeKey = operationId;
   const balancesBefore = { energy: 0, diamond: 0, yallaPoint: 0 };
   const balancesAfter = { energy: wallet.energy, diamond: wallet.diamond, yallaPoint: wallet.yallaPoint };
-  if (wallet.energy !== 200 || wallet.diamond !== 20000 || wallet.yallaPoint !== 0 || wallet.version !== 1)
+  if (wallet.energy !== 50 || wallet.diamond !== 0 || wallet.yallaPoint !== 0 || wallet.version !== 1)
     throw new Error('Starter must use the documented initial balances');
   const requestHash = createHash('sha256').update(JSON.stringify({ provider: principal.provider,
     subject: principal.subject, operationType: 'starter', balancesAfter })).digest('hex');

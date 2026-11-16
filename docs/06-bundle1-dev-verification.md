@@ -1,5 +1,7 @@
 # Bundle 1 dev 배포·검증 결과
 
+이 문서는 초기 지급량 변경 전 배포의 역사적 검증 기록이다. 현재 신규 Guest 지급량은 Energy 50 / Diamond 0 / YallaPoint 0이며, 변경 후 검증은 [07 문서](07-starter-grant-update.md)를 참조한다.
+
 검증일: 2026-11-16 (Asia/Dubai). AWS Profile `yalla-dev`, Region `ap-south-1`, Account `533266967583`.
 
 ## 배포 결과

@@ -45,7 +45,7 @@ export function newSave(now = new Date().toISOString(), uuid: () => string = ran
     progress: progressSchema.parse({ ...metadata, worldId: 'dunes', village: 1, facilityLevels: [1, 1, 1, 1, 1],
       worldRunId: 'legacy:dunes', worldRunComplete: false, worldCompletionCounts: {}, highestUnlockedWorld: 0,
       distance: '0', lastDistanceMilestone: '0', constructionStars: '0' }),
-    wallet: walletSchema.parse({ ...metadata, energy: 200, diamond: 20000, yallaPoint: 0,
+    wallet: walletSchema.parse({ ...metadata, energy: 50, diamond: 0, yallaPoint: 0,
       energyRechargeAnchor: '0', energyRechargeHighWater: String(Math.max(1, Math.floor(Date.parse(now) / 1000))) }),
   };
 }

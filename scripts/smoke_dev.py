@@ -54,7 +54,7 @@ if status != 201:
 player_id = created['save']['profile']['playerId']
 token = created['tokens']['accessToken']
 wallet = created['save']['wallet']
-check('guest create and documented initial balances', wallet['energy'] == 200 and wallet['diamond'] == 20000 and wallet['yallaPoint'] == 0)
+check('guest create and documented initial balances', wallet['energy'] == 50 and wallet['diamond'] == 0 and wallet['yallaPoint'] == 0)
 status, restored = request('POST', '/auth/guest', {'guestKey': guest_key})
 check('same credential reconnect restores exact player and wallet', status == 200 and restored['save'] == created['save'])
 for path in ['/players/me', '/players/me/progress', '/players/me/wallet', '/players/me/save']:
