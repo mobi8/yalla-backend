@@ -1,0 +1,103 @@
+"""Generate native CloudFormation templates. No deployment framework required."""
+import json
+from pathlib import Path
+
+root = Path(__file__).parent
+ref = lambda name: {"Ref": name}
+sub = lambda text: {"Fn::Sub": text}
+arn = lambda name: {"Fn::GetAtt": [name, "Arn"]}
+retain = {"DeletionPolicy": "Retain", "UpdateReplacePolicy": "Retain"}
+storage = {
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Resources": {"Artifacts": {"Type": "AWS::S3::Bucket", **retain, "Properties": {
+        "BucketEncryption": {"ServerSideEncryptionConfiguration": [{"ServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]},
+        "PublicAccessBlockConfiguration": {"BlockPublicAcls": True, "BlockPublicPolicy": True, "IgnorePublicAcls": True, "RestrictPublicBuckets": True},
+        "VersioningConfiguration": {"Status": "Enabled"},
+    }}},
+    "Outputs": {"ArtifactBucket": {"Value": ref("Artifacts")}},
+}
+storage['Resources']['ArtifactTransportPolicy'] = {"Type": "AWS::S3::BucketPolicy", "Properties": {
+    "Bucket": ref("Artifacts"), "PolicyDocument": {"Version": "2012-10-17", "Statement": [{
+        "Effect": "Deny", "Principal": "*", "Action": "s3:*",
+        "Resource": [arn("Artifacts"), sub("${Artifacts.Arn}/*")],
+        "Condition": {"Bool": {"aws:SecureTransport": "false"}},
+    }]}}}
+parameters = {"Environment": {"Type": "String", "AllowedValues": ["dev", "staging", "prod"], "Default": "dev"},
+              "ArtifactBucket": {"Type": "String"}, "ArtifactKey": {"Type": "String"}}
+resources = {
+    "PlayerTable": {"Type": "AWS::DynamoDB::Table", **retain, "Properties": {
+        "BillingMode": "PAY_PER_REQUEST", "AttributeDefinitions": [{"AttributeName": k, "AttributeType": "S"} for k in ["PK", "SK"]],
+        "KeySchema": [{"AttributeName": "PK", "KeyType": "HASH"}, {"AttributeName": "SK", "KeyType": "RANGE"}],
+        "PointInTimeRecoverySpecification": {"PointInTimeRecoveryEnabled": True},
+        "SSESpecification": {"SSEEnabled": True},
+    }},
+    "UserPool": {"Type": "AWS::Cognito::UserPool", **retain, "Properties": {
+        "UserPoolName": sub("yalla-${Environment}-players"), "DeletionProtection": "ACTIVE",
+        "AdminCreateUserConfig": {"AllowAdminCreateUserOnly": True},
+        "UsernameConfiguration": {"CaseSensitive": True},
+        "AccountRecoverySetting": {"RecoveryMechanisms": [{"Name": "admin_only", "Priority": 1}]},
+        "MfaConfiguration": "OFF",
+    }},
+    "UserPoolClient": {"Type": "AWS::Cognito::UserPoolClient", "Properties": {
+        "UserPoolId": ref("UserPool"), "ClientName": sub("yalla-${Environment}-unity"), "GenerateSecret": False,
+        "ExplicitAuthFlows": ["ALLOW_ADMIN_USER_PASSWORD_AUTH"], "PreventUserExistenceErrors": "ENABLED",
+        "EnableTokenRevocation": True,
+        # Cognito defaults: access/id 1 hour, refresh 30 days. Guest key can reauthenticate after expiry.
+        "RefreshTokenRotation": {"Feature": "ENABLED", "RetryGracePeriodSeconds": 10},
+        "SupportedIdentityProviders": ["COGNITO"],
+    }},
+    "Api": {"Type": "AWS::ApiGatewayV2::Api", "Properties": {"Name": sub("yalla-${Environment}-bundle1"), "ProtocolType": "HTTP"}},
+    "JwtAuthorizer": {"Type": "AWS::ApiGatewayV2::Authorizer", "Properties": {
+        "ApiId": ref("Api"), "Name": "CognitoAccessToken", "AuthorizerType": "JWT", "IdentitySource": ["$request.header.Authorization"],
+        "JwtConfiguration": {"Audience": [ref("UserPoolClient")], "Issuer": sub("https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}")},
+    }},
+    "AccessLogs": {"Type": "AWS::Logs::LogGroup", "Properties": {"RetentionInDays": 30}},
+    "Stage": {"Type": "AWS::ApiGatewayV2::Stage", "Properties": {
+        "ApiId": ref("Api"), "StageName": "$default", "AutoDeploy": True,
+        "DefaultRouteSettings": {"ThrottlingBurstLimit": 20, "ThrottlingRateLimit": 10},
+        "AccessLogSettings": {"DestinationArn": arn("AccessLogs"), "Format": '{"requestId":"$context.requestId","route":"$context.routeKey","status":"$context.status"}'},
+    }},
+}
+for prefix in ["Auth", "Player"]:
+    statements = [
+        {"Effect": "Allow", "Action": ["logs:CreateLogStream", "logs:PutLogEvents"], "Resource": sub("${" + prefix + "Logs.Arn}:*")},
+        {"Effect": "Allow", "Action": ["dynamodb:GetItem"], "Resource": arn("PlayerTable")},
+        {"Effect": "Allow", "Action": ["dynamodb:PutItem"], "Resource": arn("PlayerTable"),
+         "Condition": {"ForAllValues:StringEquals": {"dynamodb:EnclosingOperation": ["TransactWriteItems"]}}},
+    ]
+    if prefix == "Auth":
+        statements.append({"Effect": "Allow", "Action": ["cognito-idp:AdminCreateUser", "cognito-idp:AdminGetUser",
+                           "cognito-idp:AdminSetUserPassword", "cognito-idp:AdminInitiateAuth"], "Resource": arn("UserPool")})
+    resources[prefix + "Role"] = {"Type": "AWS::IAM::Role", "Properties": {
+        "AssumeRolePolicyDocument": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"}, "Action": "sts:AssumeRole"}]},
+        "Policies": [{"PolicyName": "Bundle1", "PolicyDocument": {"Version": "2012-10-17", "Statement": statements}}],
+    }}
+    resources[prefix + "Logs"] = {"Type": "AWS::Logs::LogGroup", "Properties": {
+        "LogGroupName": sub("/aws/lambda/yalla-${Environment}-" + prefix.lower()), "RetentionInDays": 30}}
+    resources[prefix + "Function"] = {"Type": "AWS::Lambda::Function", "DependsOn": prefix + "Logs", "Properties": {
+        "FunctionName": sub("yalla-${Environment}-" + prefix.lower()), "Runtime": "nodejs24.x", "Architectures": ["arm64"],
+        "Handler": "dist/handler.handler", "MemorySize": 256, "Timeout": 20, "Role": arn(prefix + "Role"),
+        "Code": {"S3Bucket": ref("ArtifactBucket"), "S3Key": ref("ArtifactKey")},
+        "Environment": {"Variables": {"PLAYER_TABLE": ref("PlayerTable"), "USER_POOL_ID": ref("UserPool"),
+            "USER_POOL_CLIENT_ID": ref("UserPoolClient"), "COGNITO_ISSUER": sub("https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}")}},
+    }}
+    resources[prefix + "Integration"] = {"Type": "AWS::ApiGatewayV2::Integration", "Properties": {
+        "ApiId": ref("Api"), "IntegrationType": "AWS_PROXY", "IntegrationUri": arn(prefix + "Function"), "PayloadFormatVersion": "2.0"}}
+    resources[prefix + "Permission"] = {"Type": "AWS::Lambda::Permission", "Properties": {
+        "FunctionName": ref(prefix + "Function"), "Action": "lambda:InvokeFunction", "Principal": "apigateway.amazonaws.com",
+        "SourceAccount": ref("AWS::AccountId"), "SourceArn": sub("arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/*")}}
+routes = [("AuthGuest", "POST /auth/guest", "Auth"), ("AuthRefresh", "POST /auth/refresh", "Auth"), ("AuthLogout", "POST /auth/logout", "Auth"),
+          ("GuestCreate", "POST /players/guest", "Player"), ("ProfileGet", "GET /players/me", "Player"),
+          ("SaveGet", "GET /players/me/save", "Player"), ("ProgressGet", "GET /players/me/progress", "Player"), ("WalletGet", "GET /players/me/wallet", "Player")]
+for name, route, prefix in routes:
+    properties = {"ApiId": ref("Api"), "RouteKey": route, "Target": {"Fn::Join": ["/", ["integrations", ref(prefix + "Integration")]]}, "AuthorizationType": "NONE"}
+    if prefix == "Player":
+        properties.update({"AuthorizationType": "JWT", "AuthorizerId": ref("JwtAuthorizer"), "AuthorizationScopes": ["aws.cognito.signin.user.admin"]})
+    resources[name + "Route"] = {"Type": "AWS::ApiGatewayV2::Route", "Properties": properties}
+template = {"AWSTemplateFormatVersion": "2010-09-09", "Parameters": parameters, "Resources": resources,
+            "Outputs": {key: {"Value": value} for key, value in {
+                "ApiEndpoint": {"Fn::GetAtt": ["Api", "ApiEndpoint"]}, "ApiId": ref("Api"), "PlayerTable": ref("PlayerTable"),
+                "UserPoolId": ref("UserPool"), "UserPoolClientId": ref("UserPoolClient"),
+                "AuthFunction": ref("AuthFunction"), "PlayerFunction": ref("PlayerFunction")}.items()}}
+for name, value in [("artifacts.json", storage), ("bundle1.json", template)]:
+    (root / name).write_text(json.dumps(value, indent=2) + "\n")

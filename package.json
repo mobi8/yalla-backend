@@ -1,0 +1,35 @@
+{
+  "name": "yalla-backend",
+  "version": "1.0.0",
+  "description": "Backend services for Yalla Journey.",
+  "main": "dist/handler.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mobi8/yalla-backend.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/mobi8/yalla-backend/issues"
+  },
+  "homepage": "https://github.com/mobi8/yalla-backend#readme",
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.1169.0",
+    "@aws-sdk/client-dynamodb": "^3.1169.0",
+    "@aws-sdk/lib-dynamodb": "^3.1169.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  },
+  "type": "module"
+}

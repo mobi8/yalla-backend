@@ -1,0 +1,84 @@
+import { z } from 'zod';
+import type { Principal } from './model.js';
+import { ApiError, createDynamoRepository } from './repository.js';
+import { PlayerService } from './service.js';
+import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
+import { CognitoGuestIdentity, guestKeySchema, type GuestIdentity } from './auth.js';
+
+export interface HttpEvent {
+  rawPath: string; body?: string | null; isBase64Encoded?: boolean;
+  requestContext: { http: { method: string }; authorizer?: unknown };
+}
+export type Authenticate = (event: HttpEvent) => Promise<Principal>;
+/** API Gateway verifies signatures. Lambda additionally enforces issuer, client, token type and ownership.
+ * The function has no Function URL and only its API Gateway may invoke it through resource permissions. */
+export const cognitoContext: Authenticate = async event => {
+  const parsed = z.object({ jwt: z.object({ claims: z.object({ sub: z.string().min(1).max(128), iss: z.string(),
+    client_id: z.string(), token_use: z.literal('access'), exp: z.coerce.number().int() }) }) }).safeParse(event.requestContext.authorizer);
+  if (!parsed.success || !process.env.USER_POOL_ID || !process.env.USER_POOL_CLIENT_ID || !process.env.COGNITO_ISSUER ||
+      parsed.data.jwt.claims.iss !== process.env.COGNITO_ISSUER ||
+      parsed.data.jwt.claims.client_id !== process.env.USER_POOL_CLIENT_ID || parsed.data.jwt.claims.exp <= Date.now() / 1000)
+    throw new ApiError(401, 'UNAUTHENTICATED');
+  return { provider: 'guest', subject: `${process.env.USER_POOL_ID}:${parsed.data.jwt.claims.sub}` };
+};
+const emptyBody = z.strictObject({});
+function body(event: HttpEvent): unknown {
+  try { return JSON.parse(event.body ? (event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body) : '{}'); }
+  catch { throw new ApiError(400, 'INVALID_JSON'); }
+}
+export function createHandler(service: PlayerService, authenticate: Authenticate = cognitoContext, identity?: GuestIdentity) {
+  return async (event: HttpEvent) => {
+    const response = (statusCode: number, data: unknown) => ({ statusCode,
+      headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }, body: JSON.stringify(data) });
+    try {
+      const route = `${event.requestContext.http.method} ${event.rawPath}`;
+      if (['POST /auth/guest', 'POST /auth/refresh', 'POST /auth/logout'].includes(route)) {
+        if (!identity) throw new ApiError(503, 'AUTH_NOT_CONFIGURED');
+        if (route === 'POST /auth/guest') {
+          const input = z.strictObject({ guestKey: guestKeySchema }).safeParse(body(event));
+          if (!input.success) throw new ApiError(400, 'INVALID_REQUEST');
+          const auth = await identity.bootstrap(input.data.guestKey);
+          const result = await service.createGuest(auth.principal);
+          return response(result.created ? 201 : 200, { ...result, tokens: auth.tokens });
+        }
+        const input = z.strictObject({ refreshToken: z.string().min(1).max(16384) }).safeParse(body(event));
+        if (!input.success) throw new ApiError(400, 'INVALID_REQUEST');
+        if (route.endsWith('/refresh')) return response(200, { tokens: await identity.refresh(input.data.refreshToken) });
+        await identity.revoke(input.data.refreshToken);
+        return response(200, { revoked: true });
+      }
+      if (!['POST /players/guest', 'GET /players/me', 'GET /players/me/save', 'GET /players/me/progress', 'GET /players/me/wallet'].includes(route))
+        throw new ApiError(404, 'ROUTE_NOT_FOUND');
+      const principal = await authenticate(event);
+      if (route === 'POST /players/guest') {
+        if (!emptyBody.safeParse(body(event)).success) throw new ApiError(400, 'INVALID_REQUEST');
+        const result = await service.createGuest(principal);
+        return response(result.created ? 201 : 200, result.save);
+      }
+      const save = await service.read(principal);
+      return response(200, route.endsWith('/save') ? save : route.endsWith('/progress') ? save.progress : route.endsWith('/wallet') ? save.wallet : save.profile);
+    } catch (error) {
+      if (error instanceof ApiError) return response(error.status, { error: error.code });
+      if (error instanceof Error && ['TooManyRequestsException', 'LimitExceededException'].includes(error.name))
+        return response(429, { error: 'RATE_LIMITED' });
+      if (error instanceof Error && ['NotAuthorizedException', 'UserNotFoundException', 'PasswordResetRequiredException'].includes(error.name))
+        return response(401, { error: 'UNAUTHENTICATED' });
+      // Never log error messages, request bodies or SDK command inputs (they can contain credentials).
+      console.error(JSON.stringify({ errorType: error instanceof Error ? error.name : 'UnknownError' }));
+      if (error instanceof Error && ['TransactionCanceledException', 'TransactionInProgressException', 'ProvisionedThroughputExceededException',
+        'InternalServerError', 'ServiceUnavailableException', 'TimeoutError'].includes(error.name))
+        return response(503, { error: 'RETRY_SAME_REQUEST' });
+      return response(500, { error: 'INTERNAL_ERROR' });
+    }
+  };
+}
+let configured: ReturnType<typeof createHandler> | undefined;
+export async function handler(event: HttpEvent) {
+  if (!process.env.PLAYER_TABLE) return { statusCode: 503, body: JSON.stringify({ error: 'PLAYER_TABLE_NOT_CONFIGURED' }) };
+  if (!process.env.USER_POOL_ID || !process.env.USER_POOL_CLIENT_ID || !process.env.COGNITO_ISSUER)
+    return { statusCode: 503, body: JSON.stringify({ error: 'AUTH_NOT_CONFIGURED' }) };
+  configured ??= createHandler(new PlayerService(createDynamoRepository(process.env.PLAYER_TABLE)), cognitoContext,
+    new CognitoGuestIdentity(new CognitoIdentityProviderClient({ region: process.env.AWS_REGION ?? 'ap-south-1' }),
+      process.env.USER_POOL_ID, process.env.USER_POOL_CLIENT_ID));
+  return configured(event);
+}
