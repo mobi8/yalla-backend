@@ -67,11 +67,11 @@ for prefix in ["Auth", "Player"]:
     ]
     if prefix == "Player":
         statements += [
-            {"Effect": "Allow", "Action": ["dynamodb:PutItem"], "Resource": arn("PlayerTable"),
-             "Condition": {"ForAllValues:StringEquals": {"dynamodb:EnclosingOperation": ["TransactWriteItems"]}}},
+            {"Effect": "Allow", "Action": ["dynamodb:Query"], "Resource": arn("PlayerTable")},
             {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": "arn:aws:s3:::yalla-result-pools-533266967583",
              "Condition": {"StringLike": {"s3:prefix": "result-pools/v1/*"}}},
-            {"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": "arn:aws:s3:::yalla-result-pools-533266967583/result-pools/v1/*"}]
+            {"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": ["arn:aws:s3:::yalla-result-pools-533266967583/result-pools/v1/*",
+              sub("arn:aws:s3:::yalla-result-pools-533266967583/game-config/${Environment}/v1/*")]}]
     if prefix == "Auth":
         statements.append({"Effect": "Allow", "Action": ["cognito-idp:AdminCreateUser", "cognito-idp:AdminGetUser",
                            "cognito-idp:AdminSetUserPassword", "cognito-idp:AdminInitiateAuth"], "Resource": arn("UserPool")})
@@ -87,7 +87,7 @@ for prefix in ["Auth", "Player"]:
         "Code": {"S3Bucket": ref("ArtifactBucket"), "S3Key": ref("ArtifactKey")},
         "Environment": {"Variables": {"PLAYER_TABLE": ref("PlayerTable"), "USER_POOL_ID": ref("UserPool"),
             "USER_POOL_CLIENT_ID": ref("UserPoolClient"), "ENVIRONMENT": ref("Environment"), "RESULT_POLICY": "PERMISSIVE",
-            "RESULT_POOL_BUCKET": "yalla-result-pools-533266967583", "RESULT_POOL_PREFIX": "result-pools/v1/",
+            "GAME_CONFIG_BUCKET": "yalla-result-pools-533266967583", "RESULT_POOL_BUCKET": "yalla-result-pools-533266967583", "RESULT_POOL_PREFIX": "result-pools/v1/",
             "PHYSICS_VERSION": "fixed-fresh-round-v1", "COGNITO_ISSUER": sub("https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}")}},
     }}
     resources[prefix + "Integration"] = {"Type": "AWS::ApiGatewayV2::Integration", "Properties": {
@@ -104,6 +104,11 @@ routes += [("DropSessionOpen", "POST /drop/sessions", "Player"),
            ("DropRoundGet", "GET /drop/sessions/{sessionId}/rounds/{roundId}", "Player"),
            ("DropRoundResult", "POST /drop/sessions/{sessionId}/rounds/{roundId}/result", "Player"),
            ("DropRoundCancel", "POST /drop/sessions/{sessionId}/rounds/{roundId}/cancel", "Player")]
+routes += [("BonusGet", "GET /bonuses", "Player"), ("BonusEnsure", "POST /bonuses/ensure", "Player"),
+           ("BonusAnnounce", "POST /bonuses/announce", "Player"), ("BonusFinish", "POST /bonuses/finish", "Player"),
+           ("JackpotSpin", "POST /bonuses/jackpot/spins", "Player"), ("JackpotAck", "POST /bonuses/jackpot/{operationId}/ack", "Player"),
+           ("RaidBegin", "POST /bonuses/raids", "Player"), ("RaidAttack", "POST /bonuses/raids/{operationId}/attack", "Player"),
+           ("RaidAck", "POST /bonuses/raids/{operationId}/ack", "Player"), ("RaidCancel", "POST /bonuses/raids/{operationId}/cancel", "Player")]
 for name, route, prefix in routes:
     properties = {"ApiId": ref("Api"), "RouteKey": route, "Target": {"Fn::Join": ["/", ["integrations", ref(prefix + "Integration")]]}, "AuthorizationType": "NONE"}
     if prefix == "Player":

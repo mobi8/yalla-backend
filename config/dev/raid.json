@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "environment": "dev",
+  "version": "raid-v1",
+  "data": {
+    "ticketCost": 1,
+    "multiplier": 10,
+    "shieldMaximum": 3,
+    "initialFacilityLevels": [
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "initialShieldCounts": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "eligibleUpgradeCost": 10,
+    "levelSource": "CONFIG_INITIAL",
+    "shieldRule": "CONSUME_ONE_BLOCK_ALL",
+    "botTemplates": [
+      {
+        "id": "player_1001",
+        "avatarId": "1914377d7b894820acd70169db0c7f5d"
+      },
+      {
+        "id": "player_1002",
+        "avatarId": "3c885d9cccbf4b919b2a33f1f888ea4b"
+      },
+      {
+        "id": "player_1003",
+        "avatarId": "04c7662389e4465e83cab8997e0de696"
+      },
+      {
+        "id": "player_1005",
+        "avatarId": "d0cc4f5e972e4d7fb228f8d0b59affcc"
+      },
+      {
+        "id": "player_1006",
+        "avatarId": "721e172b07fb4d1cb7718a2061bca2ba"
+      },
+      {
+        "id": "player_1007",
+        "avatarId": "ede370ced3294d71ae386fe138bc2c32"
+      }
+    ]
+  }
+}

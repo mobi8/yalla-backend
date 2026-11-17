@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "environment": "dev",
+  "version": "collection-v1",
+  "data": {
+    "crown": {
+      "required": 3,
+      "rewardType": "JackpotTicket",
+      "rewardAmount": 1,
+      "maximumTickets": 2147483647,
+      "overflow": "REJECT"
+    },
+    "yalla": {
+      "required": {
+        "Y": 1,
+        "A": 2,
+        "L": 2
+      },
+      "maximumLetters": {
+        "Y": 5,
+        "A": 10,
+        "L": 10
+      },
+      "rewardType": "RaidTicket",
+      "rewardAmount": 1,
+      "maximumTickets": 2147483647,
+      "overflow": "DISCARD_LETTERS"
+    },
+    "star": {
+      "required": 5,
+      "rewardType": "Energy",
+      "rewardAmount": 5
+    },
+    "camel": {
+      "required": 5,
+      "rewardType": "Shield",
+      "rewardAmount": 1,
+      "maximumShields": 3,
+      "overflowRewardType": "Energy",
+      "overflowRewardAmount": 3
+    }
+  }
+}

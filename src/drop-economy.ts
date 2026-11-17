@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { walletSchema, progressSchema, type Wallet, type Progress } from './model.js';
+import type { ConfigData } from './game-config.js';
 import type { Outcome } from './pools.js';
 export const collectionSchema = z.strictObject({ schemaVersion: z.literal(1), version: z.number().int().positive(), updatedAt: z.string(),
   crownProgress: z.number().int().min(0).max(2), yallaYCount: z.number().int().min(0).max(5),
@@ -29,34 +30,51 @@ const SCALE = 10n ** 28n;
 export const scaled = (s: string) => { const [a, b = ''] = s.split('.'); return BigInt(a!) * SCALE + BigInt(b.padEnd(28, '0')); };
 export const decimal = (n: bigint) => `${n / SCALE}.${String(n % SCALE).padStart(28, '0')}`.replace(/\.?0+$/, '');
 export function settle(wallet: Wallet, progress: Progress, collection: Collection, actual: Outcome,
-  prediction: string, energy: number, now: string) {
+  prediction: string, energy: number, now: string, rules: ConfigData['collection'], journey: ConfigData['journey'],
+  checkpoint?: { processedDistance: string; claimedChestCount: string }) {
   const w = structuredClone(wallet), p = structuredClone(progress), c = structuredClone(collection);
   const m = multiplier(prediction, actual.color), yallaPoint = 10 * m * energy;
   const distance = ({ Y: 5, A: 5, L: 5, Star: 10, Crown: 20, Camel: 30 }[actual.symbol]) * m * energy;
   p.distance = decimal(scaled(p.distance) + BigInt(distance) * SCALE);
-  const milestone = scaled(p.distance) / (300n * SCALE);
-  const distanceEnergy = Number(milestone > BigInt(p.lastDistanceMilestone) ? milestone - BigInt(p.lastDistanceMilestone) : 0n) * 20;
+  // Absolute processed distance, rather than a version-specific ordinal, prevents retroactive rewards on config changes.
+  const step = scaled(journey.distancePerChest), before = scaled(progress.distance);
+  const processed = checkpoint ? scaled(checkpoint.processedDistance) : before;
+  const watermark = processed > before ? processed : before;
+  const first = watermark / step + 1n;
+  let count = scaled(p.distance) / step >= first ? scaled(p.distance) / step - first + 1n : 0n;
+  const claimed = BigInt(checkpoint?.claimedChestCount ?? progress.lastDistanceMilestone);
+  if (journey.repeat === 'ONCE') count = claimed > 0n ? 0n : count > 0n ? 1n : 0n;
+  const chestReward = Number(count * BigInt(journey.rewardAmount));
+  const distanceEnergy = journey.rewardType === 'Energy' ? chestReward : 0;
+  const distanceYallaPoint = journey.rewardType === 'YallaPoint' ? chestReward : 0;
+  const milestone = scaled(p.distance) / step;
   p.lastDistanceMilestone = String(milestone > BigInt(p.lastDistanceMilestone) ? milestone : BigInt(p.lastDistanceMilestone));
-  let collectionEnergy = 0, jackpot = 0, raid = 0, shields = 0, overflow = 0;
+  let collectionEnergy = 0, jackpot = 0, raid = 0, shields = 0, overflow = 0, starCompletions = 0, camelCompletions = 0;
   switch (actual.symbol) {
-    case 'Crown': jackpot = Math.floor((c.crownProgress + energy) / 3); c.crownProgress = (c.crownProgress + energy) % 3; c.jackpotTickets += jackpot; break;
-    case 'Star': collectionEnergy = Math.floor((c.starProgress + energy) / 5) * 5; c.starProgress = (c.starProgress + energy) % 5; break;
+    case 'Crown': jackpot = Math.floor((c.crownProgress + energy) / rules.crown.required) * rules.crown.rewardAmount; c.crownProgress = (c.crownProgress + energy) % rules.crown.required; c.jackpotTickets += jackpot; break;
+    case 'Star': starCompletions = Math.floor((c.starProgress + energy) / rules.star.required); collectionEnergy = starCompletions * rules.star.rewardAmount; c.starProgress = (c.starProgress + energy) % rules.star.required; break;
     case 'Camel': {
-      const completions = Math.floor((c.camelProgress + energy) / 5); c.camelProgress = (c.camelProgress + energy) % 5;
-      shields = Math.min(completions, Math.max(0, 3 - c.shieldCount)); c.shieldCount += shields;
-      overflow = completions - shields; collectionEnergy = overflow * 3; break;
+      camelCompletions = Math.floor((c.camelProgress + energy) / rules.camel.required);
+      const completions = camelCompletions * rules.camel.rewardAmount; c.camelProgress = (c.camelProgress + energy) % rules.camel.required;
+      shields = Math.min(completions, Math.max(0, rules.camel.maximumShields - c.shieldCount)); c.shieldCount += shields;
+      overflow = completions - shields; collectionEnergy = overflow * rules.camel.overflowRewardAmount; break;
     }
     default:
-      if (actual.symbol === 'Y') c.yallaYCount = Math.min(5, c.yallaYCount + energy);
-      if (actual.symbol === 'A') c.yallaACount = Math.min(10, c.yallaACount + energy);
-      if (actual.symbol === 'L') c.yallaLCount = Math.min(10, c.yallaLCount + energy);
-      raid = Math.min(c.yallaYCount, Math.floor(c.yallaACount / 2), Math.floor(c.yallaLCount / 2));
-      c.yallaYCount -= raid; c.yallaACount -= raid * 2; c.yallaLCount -= raid * 2; c.raidTickets += raid;
+      if (actual.symbol === 'Y') c.yallaYCount = c.yallaYCount + Math.max(0, Math.min(energy, rules.yalla.maximumLetters.Y - c.yallaYCount));
+      if (actual.symbol === 'A') c.yallaACount = c.yallaACount + Math.max(0, Math.min(energy, rules.yalla.maximumLetters.A - c.yallaACount));
+      if (actual.symbol === 'L') c.yallaLCount = c.yallaLCount + Math.max(0, Math.min(energy, rules.yalla.maximumLetters.L - c.yallaLCount));
+      { const sets = Math.min(Math.floor(c.yallaYCount / rules.yalla.required.Y), Math.floor(c.yallaACount / rules.yalla.required.A), Math.floor(c.yallaLCount / rules.yalla.required.L));
+      c.yallaYCount -= sets * rules.yalla.required.Y; c.yallaACount -= sets * rules.yalla.required.A; c.yallaLCount -= sets * rules.yalla.required.L;
+      raid = sets * rules.yalla.rewardAmount; c.raidTickets += raid; }
   }
-  w.yallaPoint += yallaPoint; w.energy += distanceEnergy + collectionEnergy;
+  if ((c.jackpotTickets > rules.crown.maximumTickets && c.jackpotTickets > collection.jackpotTickets) || (c.raidTickets > rules.yalla.maximumTickets && c.raidTickets > collection.raidTickets)) throw new Error('Collection ticket capacity exceeded');
+  w.yallaPoint += yallaPoint + distanceYallaPoint; w.energy += distanceEnergy + collectionEnergy;
   if (w.energy >= 50) w.energyRechargeAnchor = '0';
   for (const item of [w, p, c]) { item.version++; item.updatedAt = now; }
   return { wallet: walletSchema.parse(w), progress: progressSchema.parse(p), collection: collectionSchema.parse(c),
-    reward: { yallaPoint, distance: String(distance), distanceEnergy, collectionEnergy, jackpotTickets: jackpot,
-      raidTickets: raid, shields, overflowShields: overflow, multiplier: m } };
+    journeyCheckpoint: { processedDistance: p.distance, claimedChestCount: String(claimed + count) },
+    journeyAward: { count: String(count), firstMilestone: String(first), distancePerChest: journey.distancePerChest,
+      rewardType: journey.rewardType, rewardAmount: journey.rewardAmount, total: chestReward },
+    reward: { yallaPoint, distanceYallaPoint, distance: String(distance), distanceEnergy, collectionEnergy, jackpotTickets: jackpot,
+      raidTickets: raid, shields, overflowShields: overflow, multiplier: m, crownCompletions: jackpot / rules.crown.rewardAmount, yallaCompletions: raid / rules.yalla.rewardAmount, starCompletions, camelCompletions } };
 }

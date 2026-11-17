@@ -1,10 +1,16 @@
+import { readFileSync } from 'node:fs';
+import { parseConfig, type ConfigSource, type ConfigName } from '../src/game-config.js';
 import { describe, it, expect } from 'vitest';
 import { DropService, type DropStore, type Write, type Session } from '../src/drop.js';
 import { newSave, type Principal, type Save } from '../src/model.js';
-import { recharge, settle, newCollection } from '../src/drop-economy.js';
+import { recharge, settle as settleConfigured, newCollection } from '../src/drop-economy.js';
 import { ResultPools, validatePool } from '../src/pools.js';
 import type { PlayerRepository } from '../src/repository.js';
 import type { S3Client } from '@aws-sdk/client-s3';
+const configs: ConfigSource = { load: async <K extends ConfigName>(name:K) => parseConfig(name,readFileSync(new URL(`../config/dev/${name}.json`,import.meta.url),'utf8'),'dev') };
+const rules = parseConfig('collection',readFileSync(new URL('../config/dev/collection.json',import.meta.url),'utf8'),'dev').data;
+const journey = parseConfig('journey',readFileSync(new URL('../config/dev/journey.json',import.meta.url),'utf8'),'dev').data;
+const settle = (...args: Parameters<typeof settleConfigured> extends [...infer _] ? [Parameters<typeof settleConfigured>[0],Parameters<typeof settleConfigured>[1],Parameters<typeof settleConfigured>[2],Parameters<typeof settleConfigured>[3],string,number,string] : never) => settleConfigured(...args,rules,journey);
 process.env.ENVIRONMENT = 'dev'; process.env.RESULT_POLICY = 'PERMISSIVE';
 const principal: Principal = { provider: 'guest', subject: 'p' };
 const input = (id = '11111111-1111-4111-8111-111111111111') => ({ requestId: id, prediction: 'RED' as const, energyCost: 3 });
@@ -25,7 +31,7 @@ function fixture() {
   const players: PlayerRepository = { find: async p => p.subject === 'p' ? player : undefined,
     read: async () => structuredClone({ profile: items.get('PROFILE'), progress: items.get('PROGRESS'), wallet: items.get('WALLET') }) as Save,
     create: async () => {} };
-  const service = new DropService(players, db, { pick: async () => structuredClone(assigned) }, () => time);
+  const service = new DropService(players, db, { pick: async () => structuredClone(assigned) }, () => time, undefined, configs);
   return { service, items, db, advance: (ms: number) => { time += ms; } };
 }
 describe('server drop economy', () => {

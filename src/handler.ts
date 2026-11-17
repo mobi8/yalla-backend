@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { GameConfigs } from './game-config.js';
+import { createBonusService, bonusInput, kindInput, raidBeginInput, attackInput, type BonusService } from './bonus.js';
 import { createDropService, beginSchema, resultSchema, cancelSchema, type DropService } from './drop.js';
 import type { Principal } from './model.js';
 import { ApiError, createDynamoRepository } from './repository.js';
@@ -27,7 +29,7 @@ function body(event: HttpEvent): unknown {
   try { return JSON.parse(event.body ? (event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body) : '{}'); }
   catch { throw new ApiError(400, 'INVALID_JSON'); }
 }
-export function createHandler(service: PlayerService, authenticate: Authenticate = cognitoContext, identity?: GuestIdentity, drops?: DropService) {
+export function createHandler(service: PlayerService, authenticate: Authenticate = cognitoContext, identity?: GuestIdentity, drops?: DropService, bonuses?: BonusService) {
   return async (event: HttpEvent) => {
     const response = (statusCode: number, data: unknown) => ({ statusCode,
       headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }, body: JSON.stringify(data) });
@@ -47,6 +49,25 @@ export function createHandler(service: PlayerService, authenticate: Authenticate
         if (route.endsWith('/refresh')) return response(200, { tokens: await identity.refresh(input.data.refreshToken) });
         await identity.revoke(input.data.refreshToken);
         return response(200, { revoked: true });
+      }
+      if (event.rawPath.startsWith('/bonuses')) {
+        if (!bonuses) throw new ApiError(503,'BONUS_NOT_CONFIGURED');
+        const principal = await authenticate(event);
+        const parse = <T>(schema:z.ZodType<T>):T => { const input=schema.safeParse(body(event));
+          if(!input.success)throw new ApiError(400,'INVALID_REQUEST');return input.data; };
+        if(route==='GET /bonuses')return response(200,await bonuses.get(principal));
+        if(route==='POST /bonuses/ensure')return response(200,await bonuses.ensure(principal,parse(kindInput).kind));
+        if(route==='POST /bonuses/finish')return response(200,await bonuses.finish(principal,parse(kindInput).kind));
+        if(route==='POST /bonuses/announce')return response(200,await bonuses.announce(principal,parse(z.strictObject({roundId:z.string().min(1).max(160)})).roundId));
+        if(route==='POST /bonuses/jackpot/spins')return response(200,await bonuses.spin(principal,parse(bonusInput)));
+        if(route==='POST /bonuses/raids')return response(200,await bonuses.beginRaid(principal,parse(raidBeginInput)));
+        const m=/^\/bonuses\/(jackpot|raids)\/([a-f0-9-]{36})\/(ack|attack|cancel)$/.exec(event.rawPath);
+        if(m && event.requestContext.http.method==='POST') {
+          if(m[3]==='ack'){parse(emptyBody);return response(200,await bonuses.acknowledge(principal,m[1]==='jackpot'?'Jackpot':'Raid',m[2]!));}
+          if(m[1]==='raids' && m[3]==='attack')return response(200,await bonuses.attack(principal,m[2]!,parse(attackInput)));
+          if(m[1]==='raids' && m[3]==='cancel'){parse(emptyBody);return response(200,await bonuses.cancelRaid(principal,m[2]!));}
+        }
+        throw new ApiError(404,'ROUTE_NOT_FOUND');
       }
       if (event.rawPath.startsWith('/drop/')) {
         if (!drops) throw new ApiError(503, 'DROP_NOT_CONFIGURED');
@@ -99,8 +120,12 @@ export async function handler(event: HttpEvent) {
   if (!process.env.PLAYER_TABLE) return { statusCode: 503, body: JSON.stringify({ error: 'PLAYER_TABLE_NOT_CONFIGURED' }) };
   if (!process.env.USER_POOL_ID || !process.env.USER_POOL_CLIENT_ID || !process.env.COGNITO_ISSUER)
     return { statusCode: 503, body: JSON.stringify({ error: 'AUTH_NOT_CONFIGURED' }) };
-  configured ??= createHandler(new PlayerService(createDynamoRepository(process.env.PLAYER_TABLE)), cognitoContext,
+  if (!configured) {
+    const configs = new GameConfigs();
+    const drops = createDropService(process.env.PLAYER_TABLE, configs);
+    configured = createHandler(new PlayerService(createDynamoRepository(process.env.PLAYER_TABLE)), cognitoContext,
     new CognitoGuestIdentity(new CognitoIdentityProviderClient({ region: process.env.AWS_REGION ?? 'ap-south-1' }),
-      process.env.USER_POOL_ID, process.env.USER_POOL_CLIENT_ID), createDropService(process.env.PLAYER_TABLE));
+      process.env.USER_POOL_ID, process.env.USER_POOL_CLIENT_ID), drops, createBonusService(process.env.PLAYER_TABLE, drops, configs));
+  }
   return configured(event);
 }

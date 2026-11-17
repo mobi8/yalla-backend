@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "environment": "dev",
+  "version": "journey-v1",
+  "data": {
+    "distancePerChest": "300",
+    "rewardType": "Energy",
+    "rewardAmount": 20,
+    "repeat": "REPEATING"
+  }
+}

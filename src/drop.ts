@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand, NumberValue } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand, QueryCommand, NumberValue } from '@aws-sdk/lib-dynamodb';
 import { z } from 'zod';
+import { GameConfigs, type ConfigSource, type GameConfig } from './game-config.js';
 import { ApiError, createDynamoRepository, playerKey, type PlayerRepository } from './repository.js';
 import type { Principal, Save, Wallet, Progress } from './model.js';
 import { ResultPools, color, outcomeSchema, type AssignedSet, type Outcome, type PoolSource } from './pools.js';
@@ -14,7 +15,7 @@ export interface Session { schemaVersion: 1; version: number; updatedAt: string;
   status: 'ACTIVE'; nextRound: number; completedRounds: number; pendingRoundId: string | null; recentConfirmedResults?: { round: number; color: string; symbol: string }[] }
 export interface Round extends AssignedSet { schemaVersion: 1; version: number; updatedAt: string; sessionId: string; roundId: string;
   roundNumber: number; status: 'ISSUED' | 'SETTLED' | 'CANCELLED'; prediction: z.infer<typeof color>; energyCost: number;
-  multiplier: number; issuedAt: string; cancelAfter: string; policy: 'PERMISSIVE';
+  multiplier: number; collectionConfig?: GameConfig<'collection'>; journeyConfig?: GameConfig<'journey'>; issuedAt: string; cancelAfter: string; policy: 'PERMISSIVE';
   actual?: Outcome; actualPhysicsVersion?: string; matchStatus?: string; reward?: ReturnType<typeof settle>['reward']; settledAt?: string }
 type Item = Record<string, any>;
 export interface Write { sk: string; value: Item; expectedVersion?: number }
@@ -24,6 +25,17 @@ export class DynamoDropStore implements DropStore {
   async get(player: string, sk: string) {
     const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: playerKey(player, sk), ConsistentRead: true }));
     if (!Item) return undefined; const { PK, SK, ...value } = Item; return value;
+  }
+  async list(player: string, prefix: string): Promise<Item[]> {
+    const items: Item[] = []; let cursor: Record<string, any> | undefined;
+    do {
+      const result = await this.client.send(new QueryCommand({ TableName: this.table,
+        KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)', ExpressionAttributeValues: { ':pk': `PLAYER#${player}`, ':sk': prefix },
+        ConsistentRead: true, ExclusiveStartKey: cursor }));
+      for (const { PK, SK, ...value } of result.Items ?? []) items.push({ ...value, _key: SK });
+      cursor = result.LastEvaluatedKey;
+    } while (cursor);
+    return items;
   }
   async commit(player: string, writes: Write[]) {
     await this.client.send(new TransactWriteCommand({ TransactItems: writes.map(w => {
@@ -41,7 +53,7 @@ const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).dige
 const conflict = (e: unknown) => e instanceof Error && ['TransactionCanceledException', 'ConditionalCheckFailedException'].includes(e.name);
 export class DropService {
   constructor(private players: PlayerRepository, private db: DropStore, private pools: PoolSource,
-    private clock = Date.now, private uuid = randomUUID) {}
+    private clock = Date.now, private uuid = randomUUID, private configs: ConfigSource = new GameConfigs()) {}
   private async owner(principal: Principal) {
     const id = await this.players.find(principal); if (!id) throw new ApiError(404, 'PLAYER_NOT_FOUND'); return id;
   }
@@ -126,14 +138,16 @@ export class DropService {
       }
       const s = (await this.session(player, sessionId))!;
       if (s.pendingRoundId) throw new ApiError(409, 'ROUND_PENDING');
+      if ((await this.db.get(player, 'BONUS#STATE'))?.run) throw new ApiError(409, 'BONUS_ACTIVE');
       const save = (await this.players.read(player))!, nowMs = this.clock(), now = new Date(nowMs).toISOString();
       const w = recharge(save.wallet, nowMs);
       if (w.energy < input.energyCost) throw new ApiError(409, 'INSUFFICIENT_ENERGY');
       w.energy -= input.energyCost;
       if (w.energy < 50 && w.energyRechargeAnchor === '0') w.energyRechargeAnchor = w.energyRechargeHighWater;
       w.version++; w.updatedAt = now;
-      const assigned = await this.pools.pick(), roundId = this.uuid();
-      const r: Round = { ...assigned, schemaVersion: 1, version: 1, updatedAt: now, sessionId, roundId, roundNumber: s.nextRound,
+      const [assigned, collectionConfig, journeyConfig] = await Promise.all([this.pools.pick(), this.configs.load('collection'), this.configs.load('journey')]);
+      const roundId = this.uuid();
+      const r: Round = { ...assigned, collectionConfig, journeyConfig, schemaVersion: 1, version: 1, updatedAt: now, sessionId, roundId, roundNumber: s.nextRound,
         status: 'ISSUED', prediction: input.prediction, energyCost: input.energyCost, multiplier: multiplier(input.prediction, assigned.expected.color),
         issuedAt: now, cancelAfter: new Date(nowMs + 120_000).toISOString(), policy: 'PERMISSIVE' };
       const next = { ...s, pendingRoundId: roundId, version: s.version + 1, updatedAt: now };
@@ -159,24 +173,33 @@ export class DropService {
       if (s.pendingRoundId !== roundId) throw new ApiError(409, 'ROUND_NOT_PENDING');
       const save = (await this.players.read(player))!, nowMs = this.clock(), now = new Date(nowMs).toISOString();
       const oldCollection = collectionSchema.parse(await this.db.get(player, 'COLLECTION'));
-      const result = settle(recharge(save.wallet, nowMs), save.progress, oldCollection, input.actual, r.prediction, r.energyCost, now);
+      const collectionConfig = r.collectionConfig ?? await this.configs.load('collection');
+      const journeyConfig = r.journeyConfig ?? await this.configs.load('journey');
+      const chestState = await this.db.get(player, 'JOURNEY#CHESTS');
+      const result = settle(recharge(save.wallet, nowMs), save.progress, oldCollection, input.actual, r.prediction, r.energyCost, now,
+        collectionConfig.data, journeyConfig.data, chestState as { processedDistance: string; claimedChestCount: string } | undefined);
       // The complete expected/actual triple is retained even when physicsVersion differs.
       const matchStatus = sameOutcome(r.expected, input.actual) && r.physicsVersion === input.physicsVersion ? 'MATCH' : 'MISMATCH';
-      const next: Round = { ...r, status: 'SETTLED', actual: input.actual, actualPhysicsVersion: input.physicsVersion, matchStatus,
-        reward: result.reward, settledAt: now, version: r.version + 1, updatedAt: now };
+      const next: Round & { journeyAward: typeof result.journeyAward } = { ...r, status: 'SETTLED', actual: input.actual, actualPhysicsVersion: input.physicsVersion, matchStatus,
+        reward: result.reward, collectionConfig, journeyConfig, journeyAward: result.journeyAward, settledAt: now, version: r.version + 1, updatedAt: now };
       const writes: Write[] = [{ sk: 'WALLET', value: result.wallet, expectedVersion: save.wallet.version },
         { sk: 'PROGRESS', value: result.progress, expectedVersion: save.progress.version },
+        { sk: 'JOURNEY#CHESTS', value: { ...result.journeyCheckpoint, schemaVersion: 1, version: (chestState?.version ?? 0) + 1,
+          updatedAt: now, configVersion: journeyConfig.version, configHash: journeyConfig.contentHash }, expectedVersion: chestState?.version },
         { sk: 'COLLECTION', value: result.collection, expectedVersion: oldCollection.version },
         { sk: `ROUND#${roundId}`, value: next, expectedVersion: r.version },
         { sk: `SESSION#${sessionId}`, expectedVersion: s.version, value: { ...s, pendingRoundId: null,
           nextRound: s.nextRound + 1, completedRounds: s.completedRounds + 1,
           recentConfirmedResults: [...(s.recentConfirmedResults ?? []), { round: r.roundNumber, color: input.actual.color, symbol: input.actual.symbol }].slice(-40), version: s.version + 1, updatedAt: now } },
         ...this.receipt('drop-settle', `settle:${roundId}`, `settle:${roundId}`, save.wallet, result.wallet,
-          { round: next, reward: result.reward }, hash({ actual: input.actual, physicsVersion: input.physicsVersion }), now)];
+          { round: next, reward: result.reward, configVersions: { collection: collectionConfig.version, journey: journeyConfig.version },
+            configHashes: { collection: collectionConfig.contentHash, journey: journeyConfig.contentHash }, journeyAward: result.journeyAward }, hash({ actual: input.actual, physicsVersion: input.physicsVersion }), now)];
       for (const kind of ['jackpotTickets', 'raidTickets'] as const) if (result.reward[kind])
         writes.push({ sk: `BONUS#${roundId}#${kind}`, value: { schemaVersion: 1, version: 1, updatedAt: now,
           roundId, sessionId, kind: kind === 'jackpotTickets' ? 'Jackpot' : 'Raid', total: result.reward[kind],
           completed: 0, totalReward: 0, announced: false, cause: 'round-collection', status: 'PENDING' } });
+      const receipt = writes.find(w => w.sk === `ECONOMY#OP#settle:${roundId}`)!;
+      receipt.value.configVersion = `${collectionConfig.version}:${journeyConfig.version}`;
       await this.db.commit(player, writes);
       console.info(JSON.stringify({ event: 'DROP_SETTLED', playerId: player, sessionId, roundId, poolFileId: r.poolFileId,
         setId: r.setId, seed: r.seed, expected: r.expected, actual: input.actual, matchStatus, physicsVersion: input.physicsVersion }));
@@ -203,7 +226,7 @@ export class DropService {
     });
   }
 }
-export function createDropService(table: string) {
+export function createDropService(table: string, configs: ConfigSource = new GameConfigs()) {
   const client = DynamoDBDocumentClient.from(new DynamoDBClient({}), { unmarshallOptions: { wrapNumbers: false } });
-  return new DropService(createDynamoRepository(table), new DynamoDropStore(client, table), new ResultPools());
+  return new DropService(createDynamoRepository(table), new DynamoDropStore(client, table), new ResultPools(), Date.now, randomUUID, configs);
 }
