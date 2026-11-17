@@ -1,0 +1,545 @@
+{
+  "schemaVersion": 1,
+  "environment": "dev",
+  "version": "world-rewards-v1",
+  "data": {
+    "releaseId": "world-bundle-v1",
+    "worlds": [
+      {
+        "worldId": "dunes",
+        "confirmed": true,
+        "completionRewards": [
+          {
+            "type": "YALLA_POINT",
+            "amount": 100
+          }
+        ]
+      },
+      {
+        "worldId": "canyon",
+        "confirmed": true,
+        "completionRewards": [
+          {
+            "type": "YALLA_POINT",
+            "amount": 100
+          }
+        ]
+      },
+      {
+        "worldId": "oasis",
+        "confirmed": true,
+        "completionRewards": [
+          {
+            "type": "YALLA_POINT",
+            "amount": 100
+          }
+        ]
+      },
+      {
+        "worldId": "bazaar",
+        "confirmed": true,
+        "completionRewards": [
+          {
+            "type": "YALLA_POINT",
+            "amount": 100
+          }
+        ]
+      },
+      {
+        "worldId": "palace",
+        "confirmed": true,
+        "completionRewards": [
+          {
+            "type": "YALLA_POINT",
+            "amount": 100
+          }
+        ]
+      },
+      {
+        "worldId": "nightcity",
+        "confirmed": true,
+        "completionRewards": [
+          {
+            "type": "YALLA_POINT",
+            "amount": 100
+          }
+        ]
+      },
+      {
+        "worldId": "goldentemple",
+        "confirmed": true,
+        "completionRewards": [
+          {
+            "type": "YALLA_POINT",
+            "amount": 100
+          }
+        ]
+      },
+      {
+        "worldId": "world-008",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-009",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-010",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-011",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-012",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-013",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-014",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-015",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-016",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-017",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-018",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-019",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-020",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-021",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-022",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-023",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-024",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-025",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-026",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-027",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-028",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-029",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-030",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-031",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-032",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-033",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-034",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-035",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-036",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-037",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-038",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-039",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-040",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-041",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-042",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-043",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-044",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-045",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-046",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-047",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-048",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-049",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-050",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-051",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-052",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-053",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-054",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-055",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-056",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-057",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-058",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-059",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-060",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-061",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-062",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-063",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-064",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-065",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-066",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-067",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-068",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-069",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-070",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-071",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-072",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-073",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-074",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-075",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-076",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-077",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-078",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-079",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-080",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-081",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-082",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-083",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-084",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-085",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-086",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-087",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-088",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-089",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-090",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-091",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-092",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-093",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-094",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-095",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-096",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-097",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-098",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-099",
+        "confirmed": false,
+        "completionRewards": []
+      },
+      {
+        "worldId": "world-100",
+        "confirmed": false,
+        "completionRewards": []
+      }
+    ]
+  }
+}

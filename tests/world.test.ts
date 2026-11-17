@@ -1,0 +1,116 @@
+import {describe,it,expect} from 'vitest';
+import {readFileSync} from 'node:fs';
+import {randomUUID} from 'node:crypto';
+import {newSave,type Save,type Principal,worlds,progressSchema} from '../src/model.js';
+import {parseConfig,type ConfigName,type ConfigSource} from '../src/game-config.js';
+import {loadWorldCatalog} from '../src/world-config.js';
+import {WorldService} from '../src/world.js';
+import {DropService,type Write} from '../src/drop.js';
+import type {BonusStore} from '../src/bonus.js';
+import type {PlayerRepository} from '../src/repository.js';
+process.env.ENVIRONMENT='dev';process.env.RESULT_POLICY='PERMISSIVE';
+const principal:Principal={provider:'guest',subject:'owner'};
+const read=<K extends ConfigName>(name:K)=>parseConfig(name,readFileSync(new URL(`../config/dev/${name}.json`,import.meta.url),'utf8'),'dev');
+async function fixture(world=1,allReady=false){
+ const save=newSave('2026-11-17T00:00:00Z');save.wallet.yallaPoint=1000;save.progress.worldId=worlds[world-1]!;save.progress.highestUnlockedWorld=world-1;
+ const items=new Map<string,any>([['PROFILE',save.profile],['PROGRESS',save.progress],['WALLET',save.wallet]]);
+ const live=new Map<ConfigName,any>(Object.keys((await import('../src/game-config.js')).configSchemas).map(k=>[k as ConfigName,read(k as ConfigName)]));
+ if(allReady){for(const w of live.get('world').data.worlds){w.enabled=true;w.contentState='READY';w.objectSetKey??='dunes';}for(const r of live.get('world-rewards').data.worlds)r.confirmed=true;}
+ const configs:ConfigSource={load:async name=>structuredClone(live.get(name))};
+ const db:BonusStore={get:async(p,sk)=>p===save.profile.playerId?structuredClone(items.get(sk)):undefined,
+ list:async(_p,prefix)=>[...items].filter(([k])=>k.startsWith(prefix)).map(([k,v])=>({...structuredClone(v),_key:k})),
+ commit:async(_p,writes:Write[])=>{for(const w of writes)if(w.expectedVersion===undefined?items.has(w.sk):items.get(w.sk)?.version!==w.expectedVersion){const e=new Error();e.name='TransactionCanceledException';throw e;}for(const w of writes)items.set(w.sk,structuredClone(w.value));}};
+ const players:PlayerRepository={find:async p=>p.subject==='owner'?save.profile.playerId:undefined,read:async()=>structuredClone({profile:items.get('PROFILE'),wallet:items.get('WALLET'),progress:items.get('PROGRESS')}) as Save,create:async()=>{}};
+ const drops=new DropService(players,db,{pick:async()=>{throw new Error();}},()=>Date.parse(save.wallet.updatedAt),undefined,configs);
+ await drops.open(principal);
+ const service=new WorldService(players,db,drops,configs,()=>Date.parse(save.wallet.updatedAt));
+ const cmd=async(id=items.get('PROGRESS').worldId)=>({requestId:randomUUID(),worldId:id,configRevision:(await service.state(principal)).catalog.revision});
+ return{service,items,configs,live,db,cmd};
+}
+describe('World 100 catalog and compatibility',()=>{
+ it('keeps 7 names/order, 5 buildings x 5 levels, authored art and unconfirmed worlds locked',async()=>{
+  const f=await fixture(),s=await f.service.state(principal);
+  expect(s.catalog.worlds).toHaveLength(100);expect(s.catalog.worlds.slice(0,7).map(w=>w.id)).toEqual(['dunes','canyon','oasis','bazaar','palace','nightcity','goldentemple']);
+  expect(s.currentWorld.buildings).toHaveLength(5);expect(s.currentWorld.buildings.every(b=>b.levels.length===5)).toBe(true);
+  expect(s.catalog.worlds.filter(w=>w.playable)).toHaveLength(7);expect(s.worldState.levels).toEqual([1,1,1,1,1]);
+  expect(s.catalog.worlds[30]!.thumbnailAssetKey).toBe(s.catalog.worlds[30]!.fallbackAssetKey);
+  expect([...f.items.keys()].filter(k=>k.startsWith('WORLD#'))).toHaveLength(0);
+ });
+ it('rejects unconfirmed or unsupported rewards and cross-file release mismatch',async()=>{
+  const f=await fixture();f.items.get('PROGRESS').facilityLevels=[5,5,5,5,5];
+  f.live.get('world-rewards').data.worlds[0].completionRewards=[{type:'COSTUME_ITEM',amount:1,itemId:'unimplemented'}];
+  await expect(f.service.execute(principal,'complete',await f.cmd())).rejects.toMatchObject({code:'WORLD_REWARD_UNSUPPORTED'});
+  expect(f.items.get('WALLET').yallaPoint).toBe(1000);
+  f.live.get('world-buildings').data.releaseId='other';await expect(f.service.state(principal)).rejects.toMatchObject({code:'WORLD_CONFIG_INVALID'});
+ });
+ it('accepts legacy schema 1 progress without resetting village, wallet or previous metadata',async()=>{
+  const f=await fixture();f.items.get('PROGRESS').village=4;f.items.get('PROGRESS').facilityLevels=[2,3,1,5,4];
+  const s=await f.service.state(principal);expect(s.worldState.levels).toEqual([2,3,1,5,4]);expect(s.save.progress.village).toBe(4);expect(s.save.wallet.yallaPoint).toBe(1000);
+  expect(progressSchema.parse({...s.save.progress,worldId:'world-100',highestUnlockedWorld:99}).worldId).toBe('world-100');
+ });
+});
+describe('World economy and one-way progress',()=>{
+ it('upgrades every building 1->5, debits 200 once, completes once, unlocks and enters world 2 with level 1',async()=>{
+  const f=await fixture();
+  for(let b=1;b<=5;b++)for(let level=1;level<=4;level++){
+   const command={...await f.cmd(),buildingId:`building-${b}` as 'building-1',expectedLevel:level};
+   const result=await f.service.execute(principal,'upgrade',command);await f.service.execute(principal,'upgrade',command);
+   expect(result.result.cost).toBe(10);
+  }
+  expect(f.items.get('WALLET').yallaPoint).toBe(800);expect(f.items.get('PROGRESS').constructionStars).toBe('20');
+  const command=await f.cmd();const [a,b]=await Promise.all([f.service.execute(principal,'complete',command),f.service.execute(principal,'complete',{...command,requestId:randomUUID()})]);
+  expect(a.save.wallet.yallaPoint).toBe(900);expect(b.save.wallet.yallaPoint).toBe(900);expect(a.unlockedWorldIds).toContain('canyon');
+  const selected=await f.service.execute(principal,'select',await f.cmd('canyon'));
+  expect(selected.save.progress).toMatchObject({worldId:'canyon',village:1,facilityLevels:[1,1,1,1,1],worldRunComplete:false});
+  expect(f.items.get('WORLD#dunes')).toMatchObject({status:'COMPLETE',levels:[5,5,5,5,5],rewardClaimed:true});
+  await expect(f.service.execute(principal,'select',await f.cmd('dunes'))).rejects.toMatchObject({code:'COMPLETE_CURRENT_WORLD_FIRST'});
+ });
+ it('rejects insufficient funds, MAX, wrong owner, locked next world and stale level',async()=>{
+  const f=await fixture();let command={...await f.cmd(),buildingId:'building-1' as const,expectedLevel:1};
+  f.items.get('WALLET').yallaPoint=0;await expect(f.service.execute(principal,'upgrade',command)).rejects.toMatchObject({code:'INSUFFICIENT_YALLA_POINT'});
+  f.items.get('WALLET').yallaPoint=100;f.items.get('PROGRESS').facilityLevels[0]=5;
+  await expect(f.service.execute(principal,'upgrade',{...command,requestId:randomUUID(),expectedLevel:5})).rejects.toMatchObject({code:'BUILDING_MAX'});
+  f.items.get('PROGRESS').facilityLevels[0]=2;await expect(f.service.execute(principal,'upgrade',{...command,requestId:randomUUID()})).rejects.toMatchObject({code:'STALE_BUILDING_LEVEL'});
+  await expect(f.service.state({...principal,subject:'other'})).rejects.toMatchObject({code:'PLAYER_NOT_FOUND'});
+  await expect(f.service.execute(principal,'select',await f.cmd('world-008'))).rejects.toMatchObject({code:'WORLD_DISABLED'});
+ });
+ it('supports distinct multiple currency rewards only in test fixtures, never invents live future rewards',async()=>{
+  const f=await fixture();f.items.get('PROGRESS').facilityLevels=[5,5,5,5,5];
+  f.live.get('world-rewards').data.worlds[0].completionRewards=[{type:'ENERGY',amount:2},{type:'YALLA_POINT',amount:3},{type:'DIAMOND',amount:4}];
+  const first=await f.service.execute(principal,'complete',await f.cmd());expect(first.save.wallet).toMatchObject({energy:52,yallaPoint:1003,diamond:4});
+  await f.service.execute(principal,'select',await f.cmd('canyon'));f.items.get('PROGRESS').facilityLevels=[5,5,5,5,5];f.items.get('WORLD#canyon').levels=[5,5,5,5,5];
+  const second=await f.service.execute(principal,'complete',await f.cmd());expect(second.save.wallet.yallaPoint).toBe(1103);
+  await expect(f.service.execute(principal,'select',await f.cmd('dunes'))).rejects.toMatchObject({code:'WORLD_SELECTION_FORBIDDEN'});
+ });
+ it('does not regrant completed world rewards after config changes',async()=>{
+  const f=await fixture();f.items.get('PROGRESS').facilityLevels=[5,5,5,5,5];
+  const first=await f.service.execute(principal,'complete',await f.cmd());
+  f.live.get('world-rewards').version='reward-v2';f.live.get('world-rewards').contentHash='f'.repeat(64);f.live.get('world-rewards').data.worlds[0].completionRewards[0].amount=999;
+  const duplicate=await f.service.execute(principal,'complete',await f.cmd());
+  expect(duplicate.save.wallet.yallaPoint).toBe(1100);expect(duplicate.result.completionRewards).toEqual(first.result.completionRewards);
+ });
+ it('pins accepted price across response loss and later config changes, and resumes after committed timeout',async()=>{
+  const f=await fixture(),command={...await f.cmd(),buildingId:'building-1' as const,expectedLevel:1};
+  const commit=f.db.commit;let fail=true;
+  f.db.commit=async(p,w)=>{if(fail&&w.some(v=>v.sk==='WALLET')){fail=false;const e=new Error();e.name='TimeoutError';throw e;}await commit(p,w);};
+  await expect(f.service.execute(principal,'upgrade',command)).rejects.toMatchObject({name:'TimeoutError'});
+  f.live.get('world-buildings').version='buildings-v2';f.live.get('world-buildings').contentHash='e'.repeat(64);f.live.get('world-buildings').data.defaults.upgradePrices=[999,999,999,999];
+  const recovered=await f.service.execute(principal,'upgrade',command);expect(recovered.result.cost).toBe(10);expect(recovered.save.wallet.yallaPoint).toBe(990);
+  const second={...await f.cmd(),buildingId:'building-1' as const,expectedLevel:2};fail=true;
+  f.live.get('world-buildings').data.defaults.upgradePrices=[10,10,10,10];
+  f.db.commit=async(p,w)=>{await commit(p,w);if(fail&&w.some(v=>v.sk==='WALLET')){fail=false;const e=new Error();e.name='TimeoutError';throw e;}};
+  await expect(f.service.execute(principal,'upgrade',second)).rejects.toMatchObject({name:'TimeoutError'});
+  expect((await f.service.execute(principal,'upgrade',second)).save.wallet.yallaPoint).toBe(980);
+ });
+ it.each([7,30,99])('handles world %i -> next boundary with explicitly synthetic ready content',async(n)=>{
+  const f=await fixture(n,true);f.items.get('PROGRESS').facilityLevels=[5,5,5,5,5];
+  await f.service.execute(principal,'complete',await f.cmd());const moved=await f.service.execute(principal,'select',await f.cmd(worlds[n]!));
+  expect(moved.save.progress.worldId).toBe(worlds[n]);expect(moved.save.progress.facilityLevels).toEqual([1,1,1,1,1]);
+ });
+ it('completes world 100 and retains terminal state with no next world',async()=>{
+  const f=await fixture(100,true);f.items.get('PROGRESS').facilityLevels=[5,5,5,5,5];
+  const result=await f.service.execute(principal,'complete',await f.cmd());expect(result.result.nextWorldId).toBeNull();
+  expect(result.save.progress).toMatchObject({worldId:'world-100',worldRunComplete:true,highestUnlockedWorld:99});
+  expect((await f.service.state(principal)).worldState.levels).toEqual([5,5,5,5,5]);
+ });
+});

@@ -1169,6 +1169,114 @@
           "aws.cognito.signin.user.admin"
         ]
       }
+    },
+    "WorldStateRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /worlds/state",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "WorldUpgradeRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /worlds/upgrade",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "WorldCompleteRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /worlds/complete",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "WorldSelectRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /worlds/select",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
     }
   },
   "Outputs": {

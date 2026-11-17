@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
-export const worlds = ['dunes', 'canyon', 'oasis', 'bazaar', 'palace', 'nightcity', 'goldentemple'] as const;
+import { worldIds } from './world-ids.js';
+export const worlds = worldIds;
 const int = z.number().int().min(0).max(2147483647);
 // C# long and decimal must never pass through a JavaScript Number.
 export const longString = z.string().regex(/^(0|[1-9]\d*)$/).refine(v =>
@@ -23,7 +24,7 @@ export const progressSchema = z.strictObject({
   facilityLevels: z.array(z.number().int().min(1).max(5)).length(5),
   worldRunId: z.string().min(1), worldRunComplete: z.boolean(),
   worldCompletionCounts: z.partialRecord(z.enum(worlds), int),
-  highestUnlockedWorld: z.number().int().min(0).max(6),
+  highestUnlockedWorld: z.number().int().min(0).max(99),
   distance: decimalString, lastDistanceMilestone: longString, constructionStars: longString,
 }).superRefine((p, ctx) => {
   if (p.highestUnlockedWorld < worlds.indexOf(p.worldId)) ctx.addIssue({ code: 'custom', message: 'World is locked' });

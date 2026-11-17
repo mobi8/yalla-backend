@@ -109,6 +109,8 @@ routes += [("BonusGet", "GET /bonuses", "Player"), ("BonusEnsure", "POST /bonuse
            ("JackpotSpin", "POST /bonuses/jackpot/spins", "Player"), ("JackpotAck", "POST /bonuses/jackpot/{operationId}/ack", "Player"),
            ("RaidBegin", "POST /bonuses/raids", "Player"), ("RaidAttack", "POST /bonuses/raids/{operationId}/attack", "Player"),
            ("RaidAck", "POST /bonuses/raids/{operationId}/ack", "Player"), ("RaidCancel", "POST /bonuses/raids/{operationId}/cancel", "Player")]
+routes += [("WorldState", "GET /worlds/state", "Player"), ("WorldUpgrade", "POST /worlds/upgrade", "Player"),
+           ("WorldComplete", "POST /worlds/complete", "Player"), ("WorldSelect", "POST /worlds/select", "Player")]
 for name, route, prefix in routes:
     properties = {"ApiId": ref("Api"), "RouteKey": route, "Target": {"Fn::Join": ["/", ["integrations", ref(prefix + "Integration")]]}, "AuthorizationType": "NONE"}
     if prefix == "Player":

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { createWorldService,worldCommand,upgradeCommand,type WorldService } from './world.js';
 import { GameConfigs } from './game-config.js';
 import { createBonusService, bonusInput, kindInput, raidBeginInput, attackInput, type BonusService } from './bonus.js';
 import { createDropService, beginSchema, resultSchema, cancelSchema, type DropService } from './drop.js';
@@ -29,7 +30,7 @@ function body(event: HttpEvent): unknown {
   try { return JSON.parse(event.body ? (event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body) : '{}'); }
   catch { throw new ApiError(400, 'INVALID_JSON'); }
 }
-export function createHandler(service: PlayerService, authenticate: Authenticate = cognitoContext, identity?: GuestIdentity, drops?: DropService, bonuses?: BonusService) {
+export function createHandler(service: PlayerService, authenticate: Authenticate = cognitoContext, identity?: GuestIdentity, drops?: DropService, bonuses?: BonusService, worlds?: WorldService) {
   return async (event: HttpEvent) => {
     const response = (statusCode: number, data: unknown) => ({ statusCode,
       headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }, body: JSON.stringify(data) });
@@ -49,6 +50,18 @@ export function createHandler(service: PlayerService, authenticate: Authenticate
         if (route.endsWith('/refresh')) return response(200, { tokens: await identity.refresh(input.data.refreshToken) });
         await identity.revoke(input.data.refreshToken);
         return response(200, { revoked: true });
+      }
+      if(event.rawPath.startsWith('/worlds/')) {
+        if(!worlds)throw new ApiError(503,'WORLD_NOT_CONFIGURED');
+        const principal=await authenticate(event);
+        if(route==='GET /worlds/state')return response(200,await worlds.state(principal));
+        const action=event.rawPath.split('/')[2];
+        if(event.requestContext.http.method==='POST' && ['upgrade','complete','select'].includes(action!)){
+          const input=(action==='upgrade'?upgradeCommand:worldCommand).safeParse(body(event));
+          if(!input.success)throw new ApiError(400,'INVALID_REQUEST');
+          return response(200,await worlds.execute(principal,action as 'upgrade'|'complete'|'select',input.data));
+        }
+        throw new ApiError(404,'ROUTE_NOT_FOUND');
       }
       if (event.rawPath.startsWith('/bonuses')) {
         if (!bonuses) throw new ApiError(503,'BONUS_NOT_CONFIGURED');
@@ -125,7 +138,7 @@ export async function handler(event: HttpEvent) {
     const drops = createDropService(process.env.PLAYER_TABLE, configs);
     configured = createHandler(new PlayerService(createDynamoRepository(process.env.PLAYER_TABLE)), cognitoContext,
     new CognitoGuestIdentity(new CognitoIdentityProviderClient({ region: process.env.AWS_REGION ?? 'ap-south-1' }),
-      process.env.USER_POOL_ID, process.env.USER_POOL_CLIENT_ID), drops, createBonusService(process.env.PLAYER_TABLE, drops, configs));
+      process.env.USER_POOL_ID, process.env.USER_POOL_CLIENT_ID), drops, createBonusService(process.env.PLAYER_TABLE, drops, configs),createWorldService(process.env.PLAYER_TABLE,drops,configs));
   }
   return configured(event);
 }

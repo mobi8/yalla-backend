@@ -1,0 +1,473 @@
+{
+  "schemaVersion": 1,
+  "environment": "dev",
+  "version": "world-buildings-v1",
+  "data": {
+    "releaseId": "world-bundle-v1",
+    "defaults": {
+      "initialLevel": 1,
+      "maxLevel": 5,
+      "upgradePrices": [
+        10,
+        10,
+        10,
+        10
+      ],
+      "buildings": [
+        {
+          "id": "building-1",
+          "displayName": "Shelter",
+          "order": 1,
+          "purchaseCondition": "PREVIOUS_LEVEL",
+          "levels": [
+            {
+              "level": 1,
+              "spriteSlot": 0,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 2,
+              "spriteSlot": 1,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 3,
+              "spriteSlot": 2,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 4,
+              "spriteSlot": 3,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 5,
+              "spriteSlot": 4,
+              "prefabAssetKey": null
+            }
+          ],
+          "layout": null
+        },
+        {
+          "id": "building-2",
+          "displayName": "Ice Cream Shop",
+          "order": 2,
+          "purchaseCondition": "PREVIOUS_LEVEL",
+          "levels": [
+            {
+              "level": 1,
+              "spriteSlot": 0,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 2,
+              "spriteSlot": 1,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 3,
+              "spriteSlot": 2,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 4,
+              "spriteSlot": 3,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 5,
+              "spriteSlot": 4,
+              "prefabAssetKey": null
+            }
+          ],
+          "layout": null
+        },
+        {
+          "id": "building-3",
+          "displayName": "Clothing Shop",
+          "order": 3,
+          "purchaseCondition": "PREVIOUS_LEVEL",
+          "levels": [
+            {
+              "level": 1,
+              "spriteSlot": 0,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 2,
+              "spriteSlot": 1,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 3,
+              "spriteSlot": 2,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 4,
+              "spriteSlot": 3,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 5,
+              "spriteSlot": 4,
+              "prefabAssetKey": null
+            }
+          ],
+          "layout": null
+        },
+        {
+          "id": "building-4",
+          "displayName": "Water / Well",
+          "order": 4,
+          "purchaseCondition": "PREVIOUS_LEVEL",
+          "levels": [
+            {
+              "level": 1,
+              "spriteSlot": 0,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 2,
+              "spriteSlot": 1,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 3,
+              "spriteSlot": 2,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 4,
+              "spriteSlot": 3,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 5,
+              "spriteSlot": 4,
+              "prefabAssetKey": null
+            }
+          ],
+          "layout": null
+        },
+        {
+          "id": "building-5",
+          "displayName": "Treasury / Chest",
+          "order": 5,
+          "purchaseCondition": "PREVIOUS_LEVEL",
+          "levels": [
+            {
+              "level": 1,
+              "spriteSlot": 0,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 2,
+              "spriteSlot": 1,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 3,
+              "spriteSlot": 2,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 4,
+              "spriteSlot": 3,
+              "prefabAssetKey": null
+            },
+            {
+              "level": 5,
+              "spriteSlot": 4,
+              "prefabAssetKey": null
+            }
+          ],
+          "layout": null
+        }
+      ]
+    },
+    "objectSets": {
+      "dunes": {
+        "backgroundAssetKey": "sprite/84e1e5da9c9f44538fa714027d3f7c7e/21300000",
+        "buildings": [
+          [
+            null,
+            "sprite/66cfeb8215ac04f76a7dc7d62f6aaa57/-1601762973211562013",
+            "sprite/f89358aca2f4d4275a5d24eba6583c90/-6149431548583555926",
+            "sprite/5d35632935d8e4022937b4740d5b601b/-1068464345619560689",
+            "sprite/810d2aa2d93b44370a4cac1d8b3baf45/-3494301982399451710"
+          ],
+          [
+            null,
+            "sprite/f0127ab59b8d140f398f1ddbb253041e/-3527573784095896292",
+            "sprite/a35d271d8b83a4e96aa3ef669b6a4af8/-838060130601455726",
+            "sprite/7ea222aa0b1b842aa9ff8d4490b5eecd/-6754447316039536937",
+            "sprite/ed18c3f01248d40c2954f195190fafac/3264678362376483587"
+          ],
+          [
+            null,
+            "sprite/6e5bcef28cc2a4357a3d88af7f22c8ca/-9104641441910191138",
+            "sprite/5ed282635d08b404c9241e0cb3fd1c30/7781295428573608930",
+            "sprite/4fa5b0f8d030f401da35747c117309f1/4967711598694968733",
+            "sprite/39a4819b87563471ca794bbcaf3e51cc/-3646572218150323153"
+          ],
+          [
+            null,
+            "sprite/4288b2f52c15c42639b33223b23c0626/5562887791681904189",
+            "sprite/9ccb6af4f69de43c0af1d133b541b93f/6093797765661652984",
+            "sprite/f243cffe55fcd4dc49fbd63db10581a4/8686833833825012323",
+            "sprite/bf6725dc2175448a894b4f68bbf73957/914692272075820280"
+          ],
+          [
+            null,
+            "sprite/a2d3394cb715942159d08d55b04a01c6/-9124493880436367069",
+            "sprite/efa8e031f61cc4153819a7c03cc93f4f/-8720169660974546887",
+            "sprite/c623113da17934f6f8e31a715d09347c/-8242088331835759497",
+            "sprite/9feb0a4e240ca443384b2fe502cb18a0/-3150070486507552106"
+          ]
+        ]
+      },
+      "canyon": {
+        "backgroundAssetKey": "sprite/ba7986671d7e428c8cc14fa4d427642b/21300000",
+        "buildings": [
+          [
+            null,
+            "sprite/d39d1faec418430b9db344200da37cff/21300000",
+            "sprite/83d01cb234ad47d89bed57ce8ea0976f/21300000",
+            "sprite/e028abde2285427fa781c45978188eef/21300000",
+            "sprite/0bf5d90eaea04a9ab53b4ed863e887d4/21300000"
+          ],
+          [
+            null,
+            "sprite/bcc3e8f10d344085a9472439bae19f7d/21300000",
+            "sprite/3a1e9b86c47e4134b0ecf2b05dfb0b02/21300000",
+            "sprite/870f47baec274c03a034980862aa3c60/21300000",
+            "sprite/c572e4aea2674cdca094c2188087890d/21300000"
+          ],
+          [
+            null,
+            "sprite/f82a47128af8402aa006ea2ce4276150/21300000",
+            "sprite/f61b9691c04046ad87930693041fc1d7/21300000",
+            "sprite/f6e02029f79f42de846d58530a738e1c/21300000",
+            "sprite/69f7822d7ba24374a3dd9639e8cf1ef7/21300000"
+          ],
+          [
+            null,
+            "sprite/7cbd2b6bfde443189077ef0c47a8ee0d/21300000",
+            "sprite/114d900b524c4a2fad5d5e14f271c9ab/21300000",
+            "sprite/2efe165fd16c48b49d126f973280035b/21300000",
+            "sprite/a667d654978e45a89fa5a9113b597dc0/21300000"
+          ],
+          [
+            null,
+            "sprite/d71b25bda62b4882bc666b8e8c7143fa/21300000",
+            "sprite/95616110c48b4af5a5b74627a8a41306/21300000",
+            "sprite/0115f1dd70ec46fda4afcff6b58ef288/21300000",
+            "sprite/0f00b855f43d432cb8804938b52e5071/21300000"
+          ]
+        ]
+      },
+      "oasis": {
+        "backgroundAssetKey": "sprite/e609ceebd4d945c4a86add644e5d0999/21300000",
+        "buildings": [
+          [
+            null,
+            "sprite/4633918ebe6e4eaeb34fe76291845e48/21300000",
+            "sprite/9a9ac8e56fdf4b6eb6f2eae8a0cc4d5a/21300000",
+            "sprite/8b2d4610e0974d7cbc66d93a6b1c0f3a/21300000",
+            "sprite/ae5388d097904143adc822a752471967/21300000"
+          ],
+          [
+            null,
+            "sprite/dbffa5489ed442b897ec756179f73a1c/21300000",
+            "sprite/99ff064fb38d492da9884449a60dc726/21300000",
+            "sprite/923fbc8fced84b7fbc5c21740d55a487/21300000",
+            "sprite/c0e4f0e1757a4f4ab60cf5003894e2de/21300000"
+          ],
+          [
+            null,
+            "sprite/0f7b01fab83a4229a2162a494f2bae8f/21300000",
+            "sprite/3ff51245080240d4ad0075aa00ad11ea/21300000",
+            "sprite/ffb5c558546d458cbe18d2e9c2e14208/21300000",
+            "sprite/eb9af3c605c84392a86ca58b32691569/21300000"
+          ],
+          [
+            null,
+            "sprite/93c44f1632304a2d93da2b1d4352e733/21300000",
+            "sprite/721f228dd09842178343f21326166bef/21300000",
+            "sprite/7e26e8c5370e4567811fbfc9579ba663/21300000",
+            "sprite/39561be8eb42407d9a8048be52ce4529/21300000"
+          ],
+          [
+            null,
+            "sprite/267a72a8baf34fa3bccb5e6e81ceb75f/21300000",
+            "sprite/b48cadc09a3e45d4ae0f460786439091/21300000",
+            "sprite/b745ae3a072d4efb914b760aedbf355d/21300000",
+            "sprite/bb3f956370954bb4aed8e8d182433709/21300000"
+          ]
+        ]
+      },
+      "bazaar": {
+        "backgroundAssetKey": "sprite/28f5a07378c643ccad859ac135c7fac6/21300000",
+        "buildings": [
+          [
+            null,
+            "sprite/fb8cd2bb3862464981040b86a4a04c8f/21300000",
+            "sprite/b8221c5661e24818967f48be29ec0361/21300000",
+            "sprite/8d62ec365bad4944b47ce49be90cc862/21300000",
+            "sprite/f567005eaf284b79add3d5d4b6c96e10/21300000"
+          ],
+          [
+            null,
+            "sprite/b14d2970be9e4a10ad115cbedffede2c/21300000",
+            "sprite/1b76eaa9e6b542ae8e207858f2634315/21300000",
+            "sprite/3c03c99b401b4741bb9c1f618cc44ab5/21300000",
+            "sprite/9051bf7731724aef9278cd811fb2c605/21300000"
+          ],
+          [
+            null,
+            "sprite/e375230b8f8949ed8821c7febf6b7e87/21300000",
+            "sprite/d9bd8132f2754ac896e6972577bbc0e2/21300000",
+            "sprite/7a409c282bf34128bee1dc237a3d8888/21300000",
+            "sprite/d5538a2d04cb4fa08d4e722365efc5c3/21300000"
+          ],
+          [
+            null,
+            "sprite/3de45b974b1a4970b02a85c1ba7527cd/21300000",
+            "sprite/fa08ce5072eb43f2afd57a9771fa9a56/21300000",
+            "sprite/70b96789843c473da41c76003fe47a04/21300000",
+            "sprite/038a333905754e1398d8590dbda80636/21300000"
+          ],
+          [
+            null,
+            "sprite/94c7271646db4212a45e12e6fbad73e1/21300000",
+            "sprite/cce9f5d8ce794835ba10a7bd0eeff430/21300000",
+            "sprite/ff9b7a744aa54365b4b6c4c1c90edcc0/21300000",
+            "sprite/37cc3a17cd2044ea8d450e9e86ec035e/21300000"
+          ]
+        ]
+      },
+      "palace": {
+        "backgroundAssetKey": "sprite/183182de698c47c9a693be902c76917e/21300000",
+        "buildings": [
+          [
+            null,
+            "sprite/8223fec5517d4fb699eb3951f89ac39b/21300000",
+            "sprite/e9fe0a7d266445ae879e44acc1c93b95/21300000",
+            "sprite/55c08f119ee345ff96e4f26b13483263/21300000",
+            "sprite/a966f3e0bb8641aca03d6aad8a3077b6/21300000"
+          ],
+          [
+            null,
+            "sprite/09ba51bbb68d49fbad3debbc150640b7/21300000",
+            "sprite/67b577bcbcbb4411be46e3f80ca15051/21300000",
+            "sprite/6c41c94b36e44166a098daad403d2503/21300000",
+            "sprite/4982dbd671cc4a4885ee81e99d50b71e/21300000"
+          ],
+          [
+            null,
+            "sprite/7b0d2fe4647e46d19b17e6268070ba16/21300000",
+            "sprite/15d08e27e2e0447a9ab48bd3ec46af2a/21300000",
+            "sprite/c86355b7a7014100a59668a3136c1962/21300000",
+            "sprite/12edc1cc061a430597e33d4901bc80cd/21300000"
+          ],
+          [
+            null,
+            "sprite/73743162953848b68773006bc6344b07/21300000",
+            "sprite/796274c19d0a44ef93c12347d1c06186/21300000",
+            "sprite/3d2d692c528d4be9ba47279319217534/21300000",
+            "sprite/b7c9503d9f7047d08d623d0bff53ab90/21300000"
+          ],
+          [
+            null,
+            "sprite/65505434ea284a81b28f80e750c4d280/21300000",
+            "sprite/4200f073b79041e1b20280fc14049ed5/21300000",
+            "sprite/178f1157b40448febcd36707d5952e6e/21300000",
+            "sprite/353128eeac524add91391480cc651e88/21300000"
+          ]
+        ]
+      },
+      "nightcity": {
+        "backgroundAssetKey": "sprite/193a696eb8404692a12b02a28b9f596f/21300000",
+        "buildings": [
+          [
+            null,
+            "sprite/67abcf80e4714fd38efa6cc8b8fe44d2/21300000",
+            "sprite/37d80e6f77074fc081a9bb4f64bb8cb3/21300000",
+            "sprite/eb017a190b764ef78d9feb9139d81100/21300000",
+            "sprite/a5ba5ebb25ae41e4a1e2073a80328c55/21300000"
+          ],
+          [
+            null,
+            "sprite/0a91cd41ce46473f9c871a4240cfac15/21300000",
+            "sprite/dce71d44686b4629bff9eacfb7f117f5/21300000",
+            "sprite/2dc395265f894e8a9bf52fe23b730854/21300000",
+            "sprite/3beb41d0cddd4dd0a42e7ebdaf388f25/21300000"
+          ],
+          [
+            null,
+            "sprite/21fa520719d44eb7ad1c2d269f0d5c7e/21300000",
+            "sprite/2adeb55422e14a2fad45ca9d0e90beb0/21300000",
+            "sprite/86ced0d0725e40e4919bf5ade695c2f7/21300000",
+            "sprite/0191e59a49f84413bbb29603f0cb6fa0/21300000"
+          ],
+          [
+            null,
+            "sprite/842dcbc7543b498f925c79aaaa7f7aa3/21300000",
+            "sprite/8305edf889ff4c7895488d9a98df40b8/21300000",
+            "sprite/7c9e870ad7fd4e4a8ba3814306c9ebe8/21300000",
+            "sprite/b96251eea0c745d3a631d76bf53bcf94/21300000"
+          ],
+          [
+            null,
+            "sprite/c69b5f795dcc40f9b900e50c5173566b/21300000",
+            "sprite/2822fde3c1a841e0b0c0fe86d6f9ca83/21300000",
+            "sprite/893eb4a94f0b410ba7904837401b821b/21300000",
+            "sprite/33cb80b8e0a94200a7735ef0d46b07f0/21300000"
+          ]
+        ]
+      },
+      "goldentemple": {
+        "backgroundAssetKey": "sprite/75774b7a0b154959a7ea5cc39c33b687/21300000",
+        "buildings": [
+          [
+            null,
+            "sprite/be3ad26dec564667a908aa8f7616cf3e/21300000",
+            "sprite/1a7d88b551354ac08741729fd5819c4f/21300000",
+            "sprite/1248648cc5554d9b8406b9172096b1a2/21300000",
+            "sprite/6382252ac0f649cd83873cbb965f99f4/21300000"
+          ],
+          [
+            null,
+            "sprite/ad166ce644ab467293bf618529a12afd/21300000",
+            "sprite/a1d5e39ed7ba48ce810ca5f0dadf8a06/21300000",
+            "sprite/e92c52785cdd4ef58c6432b4d7618a06/21300000",
+            "sprite/5ddb68eb1cd543bfb1aed31cc5039e5e/21300000"
+          ],
+          [
+            null,
+            "sprite/9b074b96672847208f6d22be072053a0/21300000",
+            "sprite/34f27835c85943cdb12ecf3fec903fcc/21300000",
+            "sprite/b76d3e44f3b5434bb4a3d685cd1e6e8f/21300000",
+            "sprite/26142a4063e844a4b8c9571fde32ef6b/21300000"
+          ],
+          [
+            null,
+            "sprite/ccb168e223aa465bb5efe49b06a9d453/21300000",
+            "sprite/5424f3e71092448fbbee7ba84c38b317/21300000",
+            "sprite/c6e42bf8cbee461488514b1be130aaf2/21300000",
+            "sprite/04167d26b819442695a6f3beeb9436b5/21300000"
+          ],
+          [
+            null,
+            "sprite/536d6c4431f34617a0ee38d4fe8093ca/21300000",
+            "sprite/07744d0b89664e43a4798e7fdd62c18b/21300000",
+            "sprite/ec4dca65eb794dbfa2cc8d69fdaafea7/21300000",
+            "sprite/f105f3de0f21456d864962914e69cf64/21300000"
+          ]
+        ]
+      }
+    },
+    "worldOverrides": {}
+  }
+}
