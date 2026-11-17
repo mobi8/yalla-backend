@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { createDropService, beginSchema, resultSchema, cancelSchema, type DropService } from './drop.js';
 import type { Principal } from './model.js';
 import { ApiError, createDynamoRepository } from './repository.js';
 import { PlayerService } from './service.js';
@@ -26,7 +27,7 @@ function body(event: HttpEvent): unknown {
   try { return JSON.parse(event.body ? (event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body) : '{}'); }
   catch { throw new ApiError(400, 'INVALID_JSON'); }
 }
-export function createHandler(service: PlayerService, authenticate: Authenticate = cognitoContext, identity?: GuestIdentity) {
+export function createHandler(service: PlayerService, authenticate: Authenticate = cognitoContext, identity?: GuestIdentity, drops?: DropService) {
   return async (event: HttpEvent) => {
     const response = (statusCode: number, data: unknown) => ({ statusCode,
       headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }, body: JSON.stringify(data) });
@@ -46,6 +47,27 @@ export function createHandler(service: PlayerService, authenticate: Authenticate
         if (route.endsWith('/refresh')) return response(200, { tokens: await identity.refresh(input.data.refreshToken) });
         await identity.revoke(input.data.refreshToken);
         return response(200, { revoked: true });
+      }
+      if (event.rawPath.startsWith('/drop/')) {
+        if (!drops) throw new ApiError(503, 'DROP_NOT_CONFIGURED');
+        const principal = await authenticate(event);
+        const parse = <T>(schema: z.ZodType<T>): T => {
+          const value = schema.safeParse(body(event));
+          if (!value.success) throw new ApiError(400, 'INVALID_REQUEST'); return value.data;
+        };
+        if (route === 'POST /drop/sessions') { parse(emptyBody); return response(200, await drops.open(principal)); }
+        if (route === 'GET /drop/sessions/active') return response(200, await drops.active(principal));
+        const match = /^\/drop\/sessions\/([a-f0-9-]{36})\/rounds(?:\/([a-f0-9-]{36})(?:\/(result|cancel))?)?$/.exec(event.rawPath);
+        if (!match) throw new ApiError(404, 'ROUTE_NOT_FOUND');
+        const [, sessionId, roundId, action] = match;
+        if (!roundId && event.requestContext.http.method === 'POST')
+          return response(200, await drops.begin(principal, sessionId!, parse(beginSchema)));
+        if (roundId && !action && event.requestContext.http.method === 'GET')
+          return response(200, await drops.round(principal, sessionId!, roundId));
+        if (roundId && action && event.requestContext.http.method === 'POST')
+          return response(200, action === 'result' ? await drops.submit(principal, sessionId!, roundId, parse(resultSchema)) :
+            await drops.cancel(principal, sessionId!, roundId, parse(cancelSchema)));
+        throw new ApiError(404, 'ROUTE_NOT_FOUND');
       }
       if (!['POST /players/guest', 'GET /players/me', 'GET /players/me/save', 'GET /players/me/progress', 'GET /players/me/wallet'].includes(route))
         throw new ApiError(404, 'ROUTE_NOT_FOUND');
@@ -79,6 +101,6 @@ export async function handler(event: HttpEvent) {
     return { statusCode: 503, body: JSON.stringify({ error: 'AUTH_NOT_CONFIGURED' }) };
   configured ??= createHandler(new PlayerService(createDynamoRepository(process.env.PLAYER_TABLE)), cognitoContext,
     new CognitoGuestIdentity(new CognitoIdentityProviderClient({ region: process.env.AWS_REGION ?? 'ap-south-1' }),
-      process.env.USER_POOL_ID, process.env.USER_POOL_CLIENT_ID));
+      process.env.USER_POOL_ID, process.env.USER_POOL_CLIENT_ID), createDropService(process.env.PLAYER_TABLE));
   return configured(event);
 }

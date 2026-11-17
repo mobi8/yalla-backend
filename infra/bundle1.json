@@ -294,6 +294,13 @@
             "USER_POOL_CLIENT_ID": {
               "Ref": "UserPoolClient"
             },
+            "ENVIRONMENT": {
+              "Ref": "Environment"
+            },
+            "RESULT_POLICY": "PERMISSIVE",
+            "RESULT_POOL_BUCKET": "yalla-result-pools-533266967583",
+            "RESULT_POOL_PREFIX": "result-pools/v1/",
+            "PHYSICS_VERSION": "fixed-fresh-round-v1",
             "COGNITO_ISSUER": {
               "Fn::Sub": "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
             }
@@ -394,6 +401,44 @@
                       ]
                     }
                   }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:PutItem"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "PlayerTable",
+                      "Arn"
+                    ]
+                  },
+                  "Condition": {
+                    "ForAllValues:StringEquals": {
+                      "dynamodb:EnclosingOperation": [
+                        "TransactWriteItems"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:ListBucket"
+                  ],
+                  "Resource": "arn:aws:s3:::yalla-result-pools-533266967583",
+                  "Condition": {
+                    "StringLike": {
+                      "s3:prefix": "result-pools/v1/*"
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": "arn:aws:s3:::yalla-result-pools-533266967583/result-pools/v1/*"
                 }
               ]
             }
@@ -449,6 +494,13 @@
             "USER_POOL_CLIENT_ID": {
               "Ref": "UserPoolClient"
             },
+            "ENVIRONMENT": {
+              "Ref": "Environment"
+            },
+            "RESULT_POLICY": "PERMISSIVE",
+            "RESULT_POOL_BUCKET": "yalla-result-pools-533266967583",
+            "RESULT_POOL_PREFIX": "result-pools/v1/",
+            "PHYSICS_VERSION": "fixed-fresh-round-v1",
             "COGNITO_ISSUER": {
               "Fn::Sub": "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
             }
@@ -666,6 +718,168 @@
           "Ref": "Api"
         },
         "RouteKey": "GET /players/me/wallet",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "DropSessionOpenRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /drop/sessions",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "DropSessionActiveRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /drop/sessions/active",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "DropRoundBeginRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /drop/sessions/{sessionId}/rounds",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "DropRoundGetRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /drop/sessions/{sessionId}/rounds/{roundId}",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "DropRoundResultRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /drop/sessions/{sessionId}/rounds/{roundId}/result",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "DropRoundCancelRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /drop/sessions/{sessionId}/rounds/{roundId}/cancel",
         "Target": {
           "Fn::Join": [
             "/",
