@@ -5,6 +5,8 @@ import {newSave,type Save,type Principal,worlds,progressSchema} from '../src/mod
 import {parseConfig,type ConfigName,type ConfigSource} from '../src/game-config.js';
 import {loadWorldCatalog} from '../src/world-config.js';
 import {WorldService} from '../src/world.js';
+import {IncomingRaidService,newIncomingSchedule} from '../src/incoming-raid.js';
+import {DEFAULT_BOTS} from '../src/bots-config.js';
 import {DropService,type Write} from '../src/drop.js';
 import type {BonusStore} from '../src/bonus.js';
 import type {PlayerRepository} from '../src/repository.js';
@@ -50,6 +52,59 @@ describe('World 100 catalog and compatibility',()=>{
  });
 });
 describe('World economy and one-way progress',()=>{
+ it('quotes half the previous upgrade rounded up, blocks damaged upgrades and replays repair only once',async()=>{
+  const f=await fixture(),p=f.items.get('PROGRESS');
+  f.live.get('world-buildings').data.defaults.upgradePrices=[11,21,31,41];
+  p.facilityLevels=[3,1,1,1,1];p.constructionStars='2';
+  p.villageDamage={worldRunId:p.worldRunId,village:p.village,buildings:{'building-1':'1'}};
+  const buildingId='building-1' as const;
+  const command={...await f.cmd(),buildingId,attackId:'1'};
+  expect((await f.service.state(principal)).worldState.repairs).toEqual([{buildingId,attackId:'1',cost:11}]);
+  await expect(f.service.execute(principal,'upgrade',{...await f.cmd(),buildingId,expectedLevel:3})).rejects.toMatchObject({code:'BUILDING_DAMAGED'});
+  await f.service.execute(principal,'upgrade',{...await f.cmd(),buildingId:'building-2',expectedLevel:1});
+  f.items.get('WALLET').yallaPoint=10;
+  await expect(f.service.execute(principal,'repair',command)).rejects.toMatchObject({code:'INSUFFICIENT_YALLA_POINT'});
+  f.items.get('WALLET').yallaPoint=100;
+  const [a,b]=await Promise.all([f.service.execute(principal,'repair',command),f.service.execute(principal,'repair',command)]);
+  expect(a.result).toEqual(b.result);
+  expect(a.save.wallet.yallaPoint).toBe(89);
+  expect(b.save.progress).toMatchObject({facilityLevels:[3,2,1,1,1],constructionStars:'3'});
+  expect(b.worldState.repairs).toEqual([]);
+  await f.service.execute(principal,'upgrade',{...await f.cmd(),buildingId,expectedLevel:3});
+ });
+ it('blocks completion and travel on current damage while ignoring damage from other checkpoints',async()=>{
+  const f=await fixture(),p=f.items.get('PROGRESS');
+  p.facilityLevels=[5,5,5,5,5];
+  p.villageDamage={worldRunId:p.worldRunId,village:p.village,buildings:{'building-5':'1'}};
+  await expect(f.service.execute(principal,'complete',await f.cmd())).rejects.toMatchObject({code:'VILLAGE_DAMAGED'});
+  p.villageDamage.village=p.village+1;
+  expect((await f.service.state(principal)).worldState.repairs).toEqual([]);
+  await f.service.execute(principal,'complete',await f.cmd());
+  const completed=f.items.get('PROGRESS');
+  completed.villageDamage={worldRunId:completed.worldRunId,village:completed.village,buildings:{'building-5':'2'}};
+  await expect(f.service.execute(principal,'select',await f.cmd('canyon'))).rejects.toMatchObject({code:'VILLAGE_DAMAGED'});
+  await f.service.execute(principal,'repair',{...await f.cmd(),buildingId:'building-5',attackId:'2'});
+  const selected=await f.service.execute(principal,'select',await f.cmd('canyon'));
+  expect(selected.worldState.repairs).toEqual([]);
+  expect(selected.save.progress.villageDamage).toBeUndefined();
+ });
+ it('preserves a concurrent new HIT while repairing an older attack',async()=>{
+  const f=await fixture(),p=f.items.get('PROGRESS'),player=f.items.get('PROFILE').playerId;
+  const now=Date.parse(p.updatedAt);
+  p.villageDamage={worldRunId:p.worldRunId,village:p.village,buildings:{'building-1':'1'}};
+  f.items.set('INCOMING#SCHEDULE',{...newIncomingSchedule(player,now),dueAt:p.updatedAt,sequence:2});
+  const config=structuredClone(DEFAULT_BOTS);config.incomingRaid.enabled=true;
+  const worker=new IncomingRaidService({...f.db,due:async()=>[]},{load:async()=>config},()=>now);
+  const command={...await f.cmd(),buildingId:'building-1' as const,attackId:'1'};
+  await Promise.all([worker.execute(player),f.service.execute(principal,'repair',command)]);
+  const state=await f.service.state(principal);
+  const hit=f.items.get('INCOMING#RECEIPT#0000000000000002');
+  expect(hit.outcome).toBe('HIT');
+  expect(state.worldState.repairs).toEqual([{buildingId:hit.buildingId,attackId:'2',cost:5}]);
+  expect(state.save.wallet.yallaPoint).toBe(995);
+  await f.service.execute(principal,'repair',command);
+  expect((await f.service.state(principal)).worldState.repairs).toEqual(state.worldState.repairs);
+ });
  it('upgrades every building 1->5, debits 200 once, completes once, unlocks and enters world 2 with level 1',async()=>{
   const f=await fixture();
   for(let b=1;b<=5;b++)for(let level=1;level<=4;level++){
@@ -61,6 +116,8 @@ describe('World economy and one-way progress',()=>{
   const command=await f.cmd();const [a,b]=await Promise.all([f.service.execute(principal,'complete',command),f.service.execute(principal,'complete',{...command,requestId:randomUUID()})]);
   expect(a.save.wallet.yallaPoint).toBe(900);expect(b.save.wallet.yallaPoint).toBe(900);expect(a.unlockedWorldIds).toContain('canyon');
   const selected=await f.service.execute(principal,'select',await f.cmd('canyon'));
+  expect(f.items.get('BONUS#STATE').raid.bots).toHaveLength(10);
+  expect(f.items.get('BONUS#STATE').raid.bots.every((bot: any) => bot.worldId === 'canyon')).toBe(true);
   expect(selected.save.progress).toMatchObject({worldId:'canyon',village:1,facilityLevels:[1,1,1,1,1],worldRunComplete:false});
   expect(f.items.get('WORLD#dunes')).toMatchObject({status:'COMPLETE',levels:[5,5,5,5,5],rewardClaimed:true});
   await expect(f.service.execute(principal,'select',await f.cmd('dunes'))).rejects.toMatchObject({code:'COMPLETE_CURRENT_WORLD_FIRST'});

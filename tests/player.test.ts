@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { DEFAULT_BOTS } from '../src/bots-config.js';
+import { parseConfig } from '../src/game-config.js';
 import { describe, it, expect, vi } from 'vitest';
 import { NumberValue, TransactGetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { decimalString, longString, newSave, progressSchema, type Save, type Principal } from '../src/model.js';
@@ -22,7 +25,9 @@ function event(method: string, path: string, body?: string): HttpEvent {
 }
 function dynamo() {
   const send = vi.fn();
-  return { send, repository: new DynamoPlayerRepository({ send } as unknown as DynamoDBDocumentClient, 'test-table') };
+  return { send, repository: new DynamoPlayerRepository({ send } as unknown as DynamoDBDocumentClient, 'test-table', { load: async name =>
+    parseConfig(name, readFileSync(new URL(`../config/dev/${name}.json`, import.meta.url), 'utf8'), 'dev') },
+  { load: async () => DEFAULT_BOTS }) };
 }
 describe('Unity-compatible models', () => {
   it('uses the existing profile and progress defaults and a server UUID', () => {
@@ -96,6 +101,21 @@ describe('HTTP boundaries', () => {
     const snapshot = JSON.parse((await handle(event('GET', '/players/me/save'))).body);
     expect(snapshot).toEqual(JSON.parse(created.body));
   });
+  it('records authenticated heartbeats and game activity without editing the save', async () => {
+    const repo = memory(), recordActivity = vi.fn();
+    const handle = createHandler(new PlayerService(repo, save), undefined, undefined, undefined, undefined, undefined, recordActivity);
+    const unauthorized = event('POST', '/players/me/heartbeat');
+    delete unauthorized.requestContext.authorizer;
+    expect((await handle(unauthorized)).statusCode).toBe(401);
+    expect(recordActivity).not.toHaveBeenCalled();
+    const created = await handle(event('POST', '/players/guest', '{}'));
+    const heartbeat = await handle(event('POST', '/players/me/heartbeat'));
+    expect(heartbeat).toMatchObject({statusCode: 204, body: ''});
+    const snapshot = await handle(event('GET', '/players/me/save'));
+    expect(JSON.parse(snapshot.body)).toEqual(JSON.parse(created.body));
+    expect(recordActivity).toHaveBeenCalledTimes(3);
+    expect(repo.create).toHaveBeenCalledTimes(1);
+  });
   it('denies missing authentication even if a player ID is submitted', async () => {
     const handle = createHandler(new PlayerService(memory()));
     const request = event('POST', '/players/guest', '{"playerId":"victim"}');
@@ -129,7 +149,8 @@ describe('DynamoDB contracts (mocked SDK, no AWS calls)', () => {
     expect(send).toHaveBeenCalledTimes(1);
     const command = send.mock.calls[0]![0] as TransactWriteCommand;
     expect(command).toBeInstanceOf(TransactWriteCommand);
-    expect(command.input.TransactItems).toHaveLength(6);
+    expect(command.input.TransactItems).toHaveLength(8);
+    expect(command.input.TransactItems?.find(write => write.Put?.Item?.SK === 'BONUS#STATE')?.Put?.Item?.raid.bots).toHaveLength(10);
     expect(command.input.TransactItems?.every(w => w.Put?.ConditionExpression === 'attribute_not_exists(PK)')).toBe(true);
     expect(command.input.TransactItems?.[2]?.Put?.Item?.distance.toString()).toBe(s.progress.distance);
   });

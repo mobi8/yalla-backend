@@ -11,7 +11,7 @@ const row = outcomeSchema.extend({ setId: z.number().int().positive(), order: z.
 export interface AssignedSet { poolFileId: string; poolVersion: string; setId: number; setKey: string;
   seed: number; physicsVersion: string; order: number[]; expected: Outcome }
 export function validatePool(text: string, file: string): AssignedSet[] {
-  const rows = z.array(row).length(100).parse(JSON.parse(text));
+  const rows = z.array(row).length(1_000).parse(JSON.parse(text));
   if (new Set(rows.map(r => r.setId)).size !== rows.length) throw new Error('Duplicate set IDs');
   const mapping = new Map<string, string>();
   const poolVersion = createHash('sha256').update(text).digest('hex');
@@ -43,7 +43,7 @@ export class ResultPools implements PoolSource {
       const page = await this.s3.send(new ListObjectsV2Command({ Bucket: this.bucket, Prefix: this.prefix, ContinuationToken: token }));
       for (const file of page.Contents ?? []) {
         const key = file.Key;
-        if (!key || !/^result_pool_100_[1-9]\d*\.json$/.test(key.slice(this.prefix.length))) continue;
+        if (!key || key !== `${this.prefix}result_pool_1000.json`) continue;
         try {
           if (!file.Size || file.Size > 1_000_000) throw new Error('Invalid pool size');
           const object = await this.s3.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));

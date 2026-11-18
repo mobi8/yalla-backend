@@ -1,3 +1,5 @@
+import { BotsConfigs, type BotsSource } from './bots-config.js';
+import { newBonusState, syncRaidBots } from './raid-bots.js';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
@@ -9,14 +11,18 @@ import { type DropStore,type Write,DropService,type Session } from './drop.js';
 import { type ConfigSource } from './game-config.js';
 import { loadWorldCatalog,buildingIds,type WorldCatalog } from './world-config.js';
 import { worldIds } from './world-ids.js';
-import { progressSchema,walletSchema,type Principal,type Save } from './model.js';
+import { currentVillageDamage,progressSchema,walletSchema,type Principal,type Save } from './model.js';
 type Item=Record<string,any>;
 export const worldCommand=z.strictObject({requestId:z.string().uuid(),worldId:z.enum(worldIds),configRevision:z.string().regex(/^[a-f0-9]{64}$/)});
 export const upgradeCommand=worldCommand.extend({buildingId:z.enum(buildingIds),expectedLevel:z.number().int().min(1).max(5)});
+export const repairCommand=worldCommand.extend({buildingId:z.enum(buildingIds),attackId:z.string().regex(/^\d{1,16}$/)});
+type WorldAction='upgrade'|'repair'|'complete'|'select';
+const repairPrice=(building:WorldCatalog['worlds'][number]['buildings'][number],level:number)=>
+ Math.ceil(building.levels[Math.max(0,level-2)]!.upgradeCost!/2);
 const hash=(v:unknown)=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const meta=(now:string,version=1)=>({schemaVersion:1,version,updatedAt:now});
 export class WorldService {
- constructor(private players:PlayerRepository,private db:DropStore,private drops:DropService,private configs:ConfigSource,private clock=Date.now){}
+ constructor(private players:PlayerRepository,private db:DropStore,private drops:DropService,private configs:ConfigSource,private clock=Date.now,private botsConfig:BotsSource=new BotsConfigs()){}
  private now(){return new Date(this.clock()).toISOString();}
  private async owner(p:Principal){const id=await this.players.find(p);if(!id)throw new ApiError(404,'PLAYER_NOT_FOUND');return id;}
  private async retry<T>(fn:()=>Promise<T>):Promise<T>{for(let i=0;i<5;i++)try{return await fn();}catch(e){if(!(e instanceof Error)||!['TransactionCanceledException','ConditionalCheckFailedException'].includes(e.name))throw e;}throw new ApiError(409,'STATE_CHANGED_RETRY_SAME_REQUEST');}
@@ -29,7 +35,7 @@ export class WorldService {
   if(session.pendingRoundId)throw new ApiError(409,'ROUND_PENDING');
   const bonus=await this.db.get(player,'BONUS#STATE');
   if(bonus?.run||bonus?.raid?.activeRaid)throw new ApiError(409,'BONUS_ACTIVE');
-  return {save,session};
+  return {save,session,bonus};
  }
  private async current(player:string,p:Save['progress']){
   const stored=await this.db.get(player,`WORLD#${p.worldId}`);
@@ -46,13 +52,19 @@ export class WorldService {
    const current=await this.current(player,p),unlocks=await this.unlocks(player,p);
    const after=(await this.players.read(player))!.progress;if(after.version!==p.version)continue;
    const definition=catalog.worlds.find(w=>w.id===p.worldId)!;
-   return {...drop,worldState:current.value,unlockedWorldIds:unlocks.value.worldIds,
+   const damage=currentVillageDamage(p);
+   const repairs=definition.buildings.flatMap(building=>{
+    const attackId=damage[building.id];
+    return attackId?[{buildingId:building.id,attackId,cost:repairPrice(building,p.facilityLevels[buildingIds.indexOf(building.id)]!)}]:[];
+   });
+   return {...drop,worldState:{...current.value,levels:current.value.levels,worldRunId:p.worldRunId,village:p.village,repairs},unlockedWorldIds:unlocks.value.worldIds,
     currentWorld:definition,catalog:{...catalog,worlds:catalog.worlds.map(({buildings,...w})=>w)}};
   }
   throw new ApiError(409,'STATE_CHANGED_RETRY_SAME_REQUEST');
  }
  private playable(w:WorldCatalog['worlds'][number]){if(!w.playable)throw new ApiError(409,w.blockedReason??'WORLD_CONTENT_NOT_READY');}
  private checkCurrent(p:Save['progress'],id:string){if(p.worldId!==id)throw new ApiError(409,'WORLD_NOT_CURRENT');}
+ private checkUndamaged(p:Save['progress']){if(Object.keys(currentVillageDamage(p)).length)throw new ApiError(409,'VILLAGE_DAMAGED');}
  private lock(session:Session):Write{return {sk:`SESSION#${session.sessionId}`,value:{...session,version:session.version+1,updatedAt:this.now()},expectedVersion:session.version};}
  private async replay(player:string,id:string,requestHash:string){
   const receipt=await this.db.get(player,`ECONOMY#OP#world:${id}`);
@@ -73,26 +85,35 @@ export class WorldService {
    if(p.worldRunComplete||current.value.status==='COMPLETE')throw new ApiError(409,'WORLD_ALREADY_COMPLETE');
    const building=w.buildings.find(b=>b.id===input.buildingId)!;
    const index=buildingIds.indexOf(input.buildingId);
+   if(currentVillageDamage(p)[buildingIds[index]!])throw new ApiError(409,'BUILDING_DAMAGED');
    if(p.facilityLevels[index]===5)throw new ApiError(409,'BUILDING_MAX');
    if(p.facilityLevels[index]!==input.expectedLevel)throw new ApiError(409,'STALE_BUILDING_LEVEL');
    cost=building.levels[input.expectedLevel-1]!.upgradeCost!;
    if(ctx.save.wallet.yallaPoint<cost)throw new ApiError(409,'INSUFFICIENT_YALLA_POINT');
+  }else if(type==='repair'){
+   this.checkCurrent(p,input.worldId);
+   if(currentVillageDamage(p)[input.buildingId as typeof buildingIds[number]]!==input.attackId)throw new ApiError(409,'BUILDING_DAMAGE_CHANGED');
+   const building=w.buildings.find(b=>b.id===input.buildingId)!;
+   cost=repairPrice(building,p.facilityLevels[buildingIds.indexOf(building.id)]!);
+   if(ctx.save.wallet.yallaPoint<cost)throw new ApiError(409,'INSUFFICIENT_YALLA_POINT');
   }else if(type==='complete'){
    this.checkCurrent(p,input.worldId);
+   this.checkUndamaged(p);
    if(p.facilityLevels.some(l=>l!==5))throw new ApiError(409,'WORLD_NOT_MAX');
   }else{
    if(!p.worldRunComplete)throw new ApiError(409,'COMPLETE_CURRENT_WORLD_FIRST');
+   this.checkUndamaged(p);
    const source=catalog.worlds.find(w=>w.id===p.worldId)!;
    const unlocks=await this.unlocks(player,p);
    if(source.nextWorldId!==input.worldId||!unlocks.value.worldIds.includes(input.worldId)||(w.unlockAfterWorldId&&(p.worldCompletionCounts[w.unlockAfterWorldId]??0)<1)||p.worldCompletionCounts[input.worldId])throw new ApiError(409,'WORLD_SELECTION_FORBIDDEN');
   }
-  const intent={...meta(this.now()),requestHash,type,input,cost,definition:w,fromWorldId:p.worldId,fromWorldRunId:p.worldRunId,
+  const intent={...meta(this.now()),requestHash,type,input,cost,definition:w,fromWorldId:p.worldId,fromWorldRunId:p.worldRunId,fromVillage:p.village,
    configVersions:catalog.versions,configHashes:catalog.hashes,catalogRevision:catalog.revision};
   // Accepted commands retain the exact price/rewards across retries and config updates. No currency mutation yet.
   try{await this.db.commit(player,[{sk:key,value:intent}]);}catch(e){const winner=await this.db.get(player,key);if(!winner)throw e;if(winner.requestHash!==requestHash)throw new ApiError(409,'IDEMPOTENCY_CONFLICT');return winner;}
   return intent;
  }
- async execute(principal:Principal,type:'upgrade'|'complete'|'select',input:z.infer<typeof worldCommand>|z.infer<typeof upgradeCommand>){
+ async execute(principal:Principal,type:WorldAction,input:z.infer<typeof worldCommand>|z.infer<typeof upgradeCommand>|z.infer<typeof repairCommand>){
   const player=await this.owner(principal),requestHash=hash({type,...input});
   let receipt=await this.replay(player,input.requestId,requestHash);
   if(receipt)return {...await this.state(principal),result:receipt.result,replayed:true};
@@ -112,20 +133,32 @@ export class WorldService {
    }
    const ctx=await this.context(player),before=ctx.save,p=structuredClone(before.progress),w=structuredClone(before.wallet),now=this.now();
    const current=await this.current(player,p),unlock=await this.unlocks(player,p),def=intent.definition as WorldCatalog['worlds'][number];
-   if(p.worldId!==intent.fromWorldId||p.worldRunId!==intent.fromWorldRunId)throw new ApiError(409,'WORLD_CHECKPOINT_CHANGED');
+   if(p.worldId!==intent.fromWorldId||p.worldRunId!==intent.fromWorldRunId||(intent.fromVillage!==undefined&&p.village!==intent.fromVillage))
+    throw new ApiError(409,'WORLD_CHECKPOINT_CHANGED');
    const extras:Write[]=[];
    let result:Item={type,worldId:input.worldId,configVersions:intent.configVersions,configHashes:intent.configHashes};
    if(type==='upgrade'){
     const command=input as z.infer<typeof upgradeCommand>,index=buildingIds.indexOf(command.buildingId);
     this.checkCurrent(p,command.worldId);
+    if(currentVillageDamage(p)[command.buildingId])throw new ApiError(409,'BUILDING_DAMAGED');
     if(p.worldRunComplete||p.facilityLevels[index]===5)throw new ApiError(409,'BUILDING_MAX');
     if(p.facilityLevels[index]!==command.expectedLevel)throw new ApiError(409,'STALE_BUILDING_LEVEL');
     if(w.yallaPoint<intent.cost)throw new ApiError(409,'INSUFFICIENT_YALLA_POINT');
     w.yallaPoint-=intent.cost;p.facilityLevels[index]!++;p.constructionStars=String(BigInt(p.constructionStars)+1n);
     result={...result,buildingId:command.buildingId,fromLevel:command.expectedLevel,toLevel:command.expectedLevel+1,cost:intent.cost};
     extras.push({sk:`WORLD#${p.worldId}`,value:{...current.value,...meta(now,(current.stored?.version??0)+1),levels:[...p.facilityLevels]},expectedVersion:current.stored?.version});
+   }else if(type==='repair'){
+    const command=input as z.infer<typeof repairCommand>;
+    const damage=currentVillageDamage(p);
+    if(damage[command.buildingId]!==command.attackId)throw new ApiError(409,'BUILDING_DAMAGE_CHANGED');
+    if(w.yallaPoint<intent.cost)throw new ApiError(409,'INSUFFICIENT_YALLA_POINT');
+    w.yallaPoint-=intent.cost;
+    delete damage[command.buildingId];
+    if(!Object.keys(damage).length)delete p.villageDamage;
+    result={...result,worldRunId:p.worldRunId,village:p.village,buildingId:command.buildingId,attackId:command.attackId,cost:intent.cost};
    }else if(type==='complete'){
     this.checkCurrent(p,input.worldId);
+    this.checkUndamaged(p);
     if(p.facilityLevels.some(l=>l!==5))throw new ApiError(409,'WORLD_NOT_MAX');
     if(p.worldRunComplete||(p.worldCompletionCounts[p.worldId]??0)>0)throw new ApiError(409,'WORLD_ALREADY_COMPLETE');
     for(const reward of def.completionRewards){if(reward.type==='ENERGY')w.energy+=reward.amount!;else if(reward.type==='YALLA_POINT')w.yallaPoint+=reward.amount!;else if(reward.type==='DIAMOND')w.diamond+=reward.amount!;else throw new ApiError(409,'WORLD_REWARD_UNSUPPORTED');}
@@ -138,9 +171,17 @@ export class WorldService {
      {sk:'WORLD#UNLOCKS',value:{...meta(now,(unlock.stored?.version??0)+1),worldIds:unlocked},expectedVersion:unlock.stored?.version});
    }else{
     if(!p.worldRunComplete||!unlock.value.worldIds.includes(input.worldId)||(p.worldCompletionCounts[input.worldId]??0)>0)throw new ApiError(409,'WORLD_SELECTION_FORBIDDEN');
+    this.checkUndamaged(p);
     const existing=await this.db.get(player,`WORLD#${input.worldId}`);if(existing?.status==='COMPLETE')throw new ApiError(409,'WORLD_SELECTION_FORBIDDEN');
     p.worldId=input.worldId;p.village=1;p.facilityLevels=[1,1,1,1,1];p.worldRunId=`world:${input.worldId}:${input.requestId}`;p.worldRunComplete=false;
+    delete p.villageDamage;
     result={...result,fromWorldId:intent.fromWorldId,toWorldId:p.worldId};
+    const [raidConfig, botSettings] = await Promise.all([this.configs.load('raid'), this.botsConfig.load()]);
+    const bonus = ctx.bonus ?? newBonusState(now);
+    const bots = syncRaidBots(p, raidConfig, botSettings, bonus.raid.bots, Date.parse(now));
+    extras.push({sk:'BONUS#STATE',value:{...bonus,...meta(now,(ctx.bonus?.version??0)+1),
+      raid:{...bonus.raid,bots}},expectedVersion:ctx.bonus?.version});
+
     extras.push({sk:`WORLD#${p.worldId}`,value:{...meta(now,(existing?.version??0)+1),worldId:p.worldId,levels:[1,1,1,1,1],status:'ACTIVE',rewardClaimed:false,completionRewards:[]},expectedVersion:existing?.version});
    }
    p.version++;p.updatedAt=now;progressSchema.parse(p);

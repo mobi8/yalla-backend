@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand, QueryCommand, NumberValue } from '@aws-sdk/lib-dynamodb';
 import { z } from 'zod';
@@ -26,15 +26,15 @@ export class DynamoDropStore implements DropStore {
     const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: playerKey(player, sk), ConsistentRead: true }));
     if (!Item) return undefined; const { PK, SK, ...value } = Item; return value;
   }
-  async list(player: string, prefix: string): Promise<Item[]> {
+  async list(player: string, prefix: string, newestLimit?: number): Promise<Item[]> {
     const items: Item[] = []; let cursor: Record<string, any> | undefined;
     do {
       const result = await this.client.send(new QueryCommand({ TableName: this.table,
         KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)', ExpressionAttributeValues: { ':pk': `PLAYER#${player}`, ':sk': prefix },
-        ConsistentRead: true, ExclusiveStartKey: cursor }));
+        ConsistentRead: true, ExclusiveStartKey: cursor, ...(newestLimit ? { ScanIndexForward: false, Limit: newestLimit-items.length } : {}) }));
       for (const { PK, SK, ...value } of result.Items ?? []) items.push({ ...value, _key: SK });
       cursor = result.LastEvaluatedKey;
-    } while (cursor);
+    } while (cursor && (!newestLimit || items.length < newestLimit));
     return items;
   }
   async commit(player: string, writes: Write[]) {
@@ -53,7 +53,8 @@ const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).dige
 const conflict = (e: unknown) => e instanceof Error && ['TransactionCanceledException', 'ConditionalCheckFailedException'].includes(e.name);
 export class DropService {
   constructor(private players: PlayerRepository, private db: DropStore, private pools: PoolSource,
-    private clock = Date.now, private uuid = randomUUID, private configs: ConfigSource = new GameConfigs()) {}
+    private clock = Date.now, private uuid = randomUUID, private configs: ConfigSource = new GameConfigs(),
+    private rollEvent = () => randomInt(10000)) {}
   private async owner(principal: Principal) {
     const id = await this.players.find(principal); if (!id) throw new ApiError(404, 'PLAYER_NOT_FOUND'); return id;
   }
@@ -194,9 +195,12 @@ export class DropService {
         ...this.receipt('drop-settle', `settle:${roundId}`, `settle:${roundId}`, save.wallet, result.wallet,
           { round: next, reward: result.reward, configVersions: { collection: collectionConfig.version, journey: journeyConfig.version },
             configHashes: { collection: collectionConfig.contentHash, journey: journeyConfig.contentHash }, journeyAward: result.journeyAward }, hash({ actual: input.actual, physicsVersion: input.physicsVersion }), now)];
+      const eventTypes = result.reward.yallaCompletions
+        ? await this.yallaEventTypes(result.reward.yallaCompletions) : [];
       for (const kind of ['jackpotTickets', 'raidTickets'] as const) if (result.reward[kind])
         writes.push({ sk: `BONUS#${roundId}#${kind}`, value: { schemaVersion: 1, version: 1, updatedAt: now,
           roundId, sessionId, kind: kind === 'jackpotTickets' ? 'Jackpot' : 'Raid', total: result.reward[kind],
+          ...(kind === 'raidTickets' ? { eventTypes } : {}),
           completed: 0, totalReward: 0, announced: false, cause: 'round-collection', status: 'PENDING' } });
       const receipt = writes.find(w => w.sk === `ECONOMY#OP#settle:${roundId}`)!;
       receipt.value.configVersion = `${collectionConfig.version}:${journeyConfig.version}`;
@@ -205,6 +209,11 @@ export class DropService {
         setId: r.setId, seed: r.seed, expected: r.expected, actual: input.actual, matchStatus, physicsVersion: input.physicsVersion }));
       return this.round(principal, sessionId, roundId);
     });
+  }
+  private async yallaEventTypes(count: number) {
+    const { data } = await this.configs.load('raid');
+    const attackWeight = data.attackWeight ?? 10000;
+    return Array.from({ length: count }, () => this.rollEvent() < attackWeight ? 'ATTACK' : 'RAID');
   }
   async cancel(principal: Principal, sessionId: string, roundId: string, input: z.infer<typeof cancelSchema>) {
     const player = await this.owner(principal);

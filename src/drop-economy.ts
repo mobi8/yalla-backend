@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { randomInt } from 'node:crypto';
 import { walletSchema, progressSchema, type Wallet, type Progress } from './model.js';
 import type { ConfigData } from './game-config.js';
 import type { Outcome } from './pools.js';
@@ -31,7 +32,7 @@ export const scaled = (s: string) => { const [a, b = ''] = s.split('.'); return 
 export const decimal = (n: bigint) => `${n / SCALE}.${String(n % SCALE).padStart(28, '0')}`.replace(/\.?0+$/, '');
 export function settle(wallet: Wallet, progress: Progress, collection: Collection, actual: Outcome,
   prediction: string, energy: number, now: string, rules: ConfigData['collection'], journey: ConfigData['journey'],
-  checkpoint?: { processedDistance: string; claimedChestCount: string }) {
+  checkpoint?: { processedDistance: string; claimedChestCount: string }, roll: () => number = () => randomInt(10000)) {
   const w = structuredClone(wallet), p = structuredClone(progress), c = structuredClone(collection);
   const m = multiplier(prediction, actual.color), yallaPoint = 10 * m * energy;
   const distance = ({ Y: 5, A: 5, L: 5, Star: 10, Crown: 20, Camel: 30 }[actual.symbol]) * m * energy;
@@ -44,9 +45,18 @@ export function settle(wallet: Wallet, progress: Progress, collection: Collectio
   let count = scaled(p.distance) / step >= first ? scaled(p.distance) / step - first + 1n : 0n;
   const claimed = BigInt(checkpoint?.claimedChestCount ?? progress.lastDistanceMilestone);
   if (journey.repeat === 'ONCE') count = claimed > 0n ? 0n : count > 0n ? 1n : 0n;
-  const chestReward = Number(count * BigInt(journey.rewardAmount));
-  const distanceEnergy = journey.rewardType === 'Energy' ? chestReward : 0;
-  const distanceYallaPoint = journey.rewardType === 'YallaPoint' ? chestReward : 0;
+  const rewards: { milestone: string; rewardType: 'Energy' | 'YallaPoint'; rewardAmount: number }[] = [];
+  for (let i = 0n; i < count; i++) {
+    let selected: { rewardType: 'Energy' | 'YallaPoint'; rewardAmount: number };
+    if ('rewards' in journey) {
+      let value = roll();
+      if (!Number.isInteger(value) || value < 0 || value >= 10000) throw new Error('Invalid Journey roll');
+      selected = journey.rewards.find(r => { value -= r.weight; return value < 0; })!;
+    } else selected = journey;
+    rewards.push({ milestone: String(first + i), rewardType: selected.rewardType, rewardAmount: selected.rewardAmount });
+  }
+  const distanceEnergy = rewards.reduce((sum, r) => sum + (r.rewardType === 'Energy' ? r.rewardAmount : 0), 0);
+  const distanceYallaPoint = rewards.reduce((sum, r) => sum + (r.rewardType === 'YallaPoint' ? r.rewardAmount : 0), 0);
   const milestone = scaled(p.distance) / step;
   p.lastDistanceMilestone = String(milestone > BigInt(p.lastDistanceMilestone) ? milestone : BigInt(p.lastDistanceMilestone));
   let collectionEnergy = 0, jackpot = 0, raid = 0, shields = 0, overflow = 0, starCompletions = 0, camelCompletions = 0;
@@ -74,7 +84,7 @@ export function settle(wallet: Wallet, progress: Progress, collection: Collectio
   return { wallet: walletSchema.parse(w), progress: progressSchema.parse(p), collection: collectionSchema.parse(c),
     journeyCheckpoint: { processedDistance: p.distance, claimedChestCount: String(claimed + count) },
     journeyAward: { count: String(count), firstMilestone: String(first), distancePerChest: journey.distancePerChest,
-      rewardType: journey.rewardType, rewardAmount: journey.rewardAmount, total: chestReward },
+      ...('rewardType' in journey ? { rewardType: journey.rewardType, rewardAmount: journey.rewardAmount, total: distanceEnergy + distanceYallaPoint } : {}), rewards },
     reward: { yallaPoint, distanceYallaPoint, distance: String(distance), distanceEnergy, collectionEnergy, jackpotTickets: jackpot,
       raidTickets: raid, shields, overflowShields: overflow, multiplier: m, crownCompletions: jackpot / rules.crown.rewardAmount, yallaCompletions: raid / rules.yalla.rewardAmount, starCompletions, camelCompletions } };
 }

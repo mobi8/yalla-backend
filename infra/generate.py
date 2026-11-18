@@ -26,8 +26,12 @@ parameters = {"Environment": {"Type": "String", "AllowedValues": ["dev", "stagin
               "ArtifactBucket": {"Type": "String"}, "ArtifactKey": {"Type": "String"}}
 resources = {
     "PlayerTable": {"Type": "AWS::DynamoDB::Table", **retain, "Properties": {
-        "BillingMode": "PAY_PER_REQUEST", "AttributeDefinitions": [{"AttributeName": k, "AttributeType": "S"} for k in ["PK", "SK"]],
+        "BillingMode": "PAY_PER_REQUEST", "AttributeDefinitions": [{"AttributeName": k, "AttributeType": "S"} for k in ["PK", "SK", "duePartition", "dueAt", "activityPartition", "lastActiveAt"]],
         "KeySchema": [{"AttributeName": "PK", "KeyType": "HASH"}, {"AttributeName": "SK", "KeyType": "RANGE"}],
+        "GlobalSecondaryIndexes": [{"IndexName": "IncomingDue", "KeySchema": [{"AttributeName": "duePartition", "KeyType": "HASH"}, {"AttributeName": "dueAt", "KeyType": "RANGE"}], "Projection": {"ProjectionType": "INCLUDE", "NonKeyAttributes": ["playerId"]}},
+            {"IndexName": "PlayerActivity", "KeySchema": [{"AttributeName": "activityPartition", "KeyType": "HASH"}, {"AttributeName": "lastActiveAt", "KeyType": "RANGE"}],
+             "Projection": {"ProjectionType": "KEYS_ONLY"}}],
+        "StreamSpecification": {"StreamViewType": "NEW_AND_OLD_IMAGES"},
         "PointInTimeRecoverySpecification": {"PointInTimeRecoveryEnabled": True},
         "SSESpecification": {"SSEEnabled": True},
     }},
@@ -58,6 +62,22 @@ resources = {
         "AccessLogSettings": {"DestinationArn": arn("AccessLogs"), "Format": '{"requestId":"$context.requestId","route":"$context.routeKey","status":"$context.status"}'},
     }},
 }
+resources["IncomingLogs"] = {"Type":"AWS::Logs::LogGroup", "Properties":{"LogGroupName":sub("/aws/lambda/yalla-${Environment}-incoming-raid"),"RetentionInDays":30}}
+resources["IncomingRole"] = {"Type":"AWS::IAM::Role", "Properties":{
+    "AssumeRolePolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]},
+    "Policies":[{"PolicyName":"IncomingRaid","PolicyDocument":{"Version":"2012-10-17","Statement":[
+        {"Effect":"Allow","Action":["logs:CreateLogStream","logs:PutLogEvents"],"Resource":sub("${IncomingLogs.Arn}:*")},
+        {"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem","dynamodb:ConditionCheckItem"],"Resource":arn("PlayerTable")},
+        {"Effect":"Allow","Action":["dynamodb:Query"],"Resource":[sub("${PlayerTable.Arn}/index/" + name) for name in ("IncomingDue", "PlayerActivity")]},
+        {"Effect":"Allow","Action":["s3:GetObject"],"Resource":sub("arn:aws:s3:::yalla-result-pools-533266967583/game-config/${Environment}/v1/bots.json")}
+    ]}}]}}
+resources["IncomingFunction"] = {"Type":"AWS::Lambda::Function","DependsOn":"IncomingLogs","Properties":{
+    "FunctionName":sub("yalla-${Environment}-incoming-raid"),"Runtime":"nodejs24.x","Architectures":["arm64"],
+    "Handler":"dist/incoming-raid.handler","MemorySize":256,"Timeout":300,"Role":arn("IncomingRole"),
+    "Code":{"S3Bucket":ref("ArtifactBucket"),"S3Key":ref("ArtifactKey")},
+    "Environment":{"Variables":{"PLAYER_TABLE":ref("PlayerTable"),"GAME_CONFIG_BUCKET":"yalla-result-pools-533266967583","ENVIRONMENT":ref("Environment")}}}}
+resources["IncomingRule"] = {"Type":"AWS::Events::Rule","Properties":{"ScheduleExpression":{"Fn::If":["IsDev","rate(1 minute)","rate(5 minutes)"]},"State":"ENABLED","Targets":[{"Id":"incoming-raid","Arn":arn("IncomingFunction")}]}}
+resources["IncomingPermission"] = {"Type":"AWS::Lambda::Permission","Properties":{"FunctionName":ref("IncomingFunction"),"Action":"lambda:InvokeFunction","Principal":"events.amazonaws.com","SourceArn":arn("IncomingRule")}}
 for prefix in ["Auth", "Player"]:
     statements = [
         {"Effect": "Allow", "Action": ["logs:CreateLogStream", "logs:PutLogEvents"], "Resource": sub("${" + prefix + "Logs.Arn}:*")},
@@ -68,11 +88,17 @@ for prefix in ["Auth", "Player"]:
     if prefix == "Player":
         statements += [
             {"Effect": "Allow", "Action": ["dynamodb:Query"], "Resource": arn("PlayerTable")},
+            {"Effect": "Allow", "Action": ["dynamodb:PutItem"], "Resource": arn("PlayerTable"),
+             "Condition": {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["PLAYER#*"]},
+                           "ForAllValues:StringEquals": {"dynamodb:Attributes": ["PK", "SK", "activityPartition", "lastActiveAt"]}}},
             {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": "arn:aws:s3:::yalla-result-pools-533266967583",
              "Condition": {"StringLike": {"s3:prefix": "result-pools/v1/*"}}},
             {"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": ["arn:aws:s3:::yalla-result-pools-533266967583/result-pools/v1/*",
               sub("arn:aws:s3:::yalla-result-pools-533266967583/game-config/${Environment}/v1/*")]}]
     if prefix == "Auth":
+        statements.append({"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": [
+            sub("arn:aws:s3:::yalla-result-pools-533266967583/game-config/${Environment}/v1/" + name + ".json")
+            for name in ("raid", "bots")]})
         statements.append({"Effect": "Allow", "Action": ["cognito-idp:AdminCreateUser", "cognito-idp:AdminGetUser",
                            "cognito-idp:AdminSetUserPassword", "cognito-idp:AdminInitiateAuth"], "Resource": arn("UserPool")})
     resources[prefix + "Role"] = {"Type": "AWS::IAM::Role", "Properties": {
@@ -96,7 +122,8 @@ for prefix in ["Auth", "Player"]:
         "FunctionName": ref(prefix + "Function"), "Action": "lambda:InvokeFunction", "Principal": "apigateway.amazonaws.com",
         "SourceAccount": ref("AWS::AccountId"), "SourceArn": sub("arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/*")}}
 routes = [("AuthGuest", "POST /auth/guest", "Auth"), ("AuthRefresh", "POST /auth/refresh", "Auth"), ("AuthLogout", "POST /auth/logout", "Auth"),
-          ("GuestCreate", "POST /players/guest", "Player"), ("ProfileGet", "GET /players/me", "Player"),
+          ("GuestCreate", "POST /players/guest", "Player"),
+           ("PlayerHeartbeat", "POST /players/me/heartbeat", "Player"), ("ProfileGet", "GET /players/me", "Player"),
           ("SaveGet", "GET /players/me/save", "Player"), ("ProgressGet", "GET /players/me/progress", "Player"), ("WalletGet", "GET /players/me/wallet", "Player")]
 routes += [("DropSessionOpen", "POST /drop/sessions", "Player"),
            ("DropSessionActive", "GET /drop/sessions/active", "Player"),
@@ -108,15 +135,19 @@ routes += [("BonusGet", "GET /bonuses", "Player"), ("BonusEnsure", "POST /bonuse
            ("BonusAnnounce", "POST /bonuses/announce", "Player"), ("BonusFinish", "POST /bonuses/finish", "Player"),
            ("JackpotSpin", "POST /bonuses/jackpot/spins", "Player"), ("JackpotAck", "POST /bonuses/jackpot/{operationId}/ack", "Player"),
            ("RaidBegin", "POST /bonuses/raids", "Player"), ("RaidAttack", "POST /bonuses/raids/{operationId}/attack", "Player"),
+           ("RaidPick", "POST /bonuses/raids/{operationId}/pick", "Player"), ("CostumePurchase", "POST /bonuses/costumes/purchase", "Player"),
+           ("CostumeEquip", "POST /bonuses/costumes/equip", "Player"),
            ("RaidAck", "POST /bonuses/raids/{operationId}/ack", "Player"), ("RaidCancel", "POST /bonuses/raids/{operationId}/cancel", "Player")]
 routes += [("WorldState", "GET /worlds/state", "Player"), ("WorldUpgrade", "POST /worlds/upgrade", "Player"),
+           ("WorldRepair", "POST /worlds/repair", "Player"),
            ("WorldComplete", "POST /worlds/complete", "Player"), ("WorldSelect", "POST /worlds/select", "Player")]
 for name, route, prefix in routes:
     properties = {"ApiId": ref("Api"), "RouteKey": route, "Target": {"Fn::Join": ["/", ["integrations", ref(prefix + "Integration")]]}, "AuthorizationType": "NONE"}
     if prefix == "Player":
         properties.update({"AuthorizationType": "JWT", "AuthorizerId": ref("JwtAuthorizer"), "AuthorizationScopes": ["aws.cognito.signin.user.admin"]})
     resources[name + "Route"] = {"Type": "AWS::ApiGatewayV2::Route", "Properties": properties}
-template = {"AWSTemplateFormatVersion": "2010-09-09", "Parameters": parameters, "Resources": resources,
+template = {"AWSTemplateFormatVersion": "2010-09-09", "Parameters": parameters,
+            "Conditions": {"IsDev": {"Fn::Equals": [ref("Environment"), "dev"]}}, "Resources": resources,
             "Outputs": {key: {"Value": value} for key, value in {
                 "ApiEndpoint": {"Fn::GetAtt": ["Api", "ApiEndpoint"]}, "ApiId": ref("Api"), "PlayerTable": ref("PlayerTable"),
                 "UserPoolId": ref("UserPool"), "UserPoolClientId": ref("UserPoolClient"),

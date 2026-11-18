@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "incomingRaid": {
+    "enabled": true,
+    "averageAttacksPerDay": 2.5,
+    "maximumAttacksPerDay": 3,
+    "shieldConsumption": 1,
+    "allowedPlayerIds": [],
+    "targetOffline": true
+  },
+  "shield": {
+    "maximum": 3,
+    "regenHours": 3
+  },
+  "bots": [
+    {
+      "id": "player_1001",
+      "avatarId": "1914377d7b894820acd70169db0c7f5d",
+      "attackEnabled": true,
+      "defenseEnabled": true
+    },
+    {
+      "id": "player_1002",
+      "avatarId": "3c885d9cccbf4b919b2a33f1f888ea4b",
+      "attackEnabled": false,
+      "defenseEnabled": true
+    },
+    {
+      "id": "player_1003",
+      "avatarId": "04c7662389e4465e83cab8997e0de696",
+      "attackEnabled": false,
+      "defenseEnabled": true
+    },
+    {
+      "id": "player_1005",
+      "avatarId": "d0cc4f5e972e4d7fb228f8d0b59affcc",
+      "attackEnabled": false,
+      "defenseEnabled": true
+    },
+    {
+      "id": "player_1006",
+      "avatarId": "721e172b07fb4d1cb7718a2061bca2ba",
+      "attackEnabled": false,
+      "defenseEnabled": true
+    },
+    {
+      "id": "player_1007",
+      "avatarId": "ede370ced3294d71ae386fe138bc2c32",
+      "attackEnabled": false,
+      "defenseEnabled": true
+    },
+    {
+      "id": "player_1008",
+      "avatarId": "1914377d7b894820acd70169db0c7f5d",
+      "attackEnabled": false,
+      "defenseEnabled": true
+    },
+    {
+      "id": "player_1009",
+      "avatarId": "3c885d9cccbf4b919b2a33f1f888ea4b",
+      "attackEnabled": false,
+      "defenseEnabled": true
+    },
+    {
+      "id": "player_1010",
+      "avatarId": "04c7662389e4465e83cab8997e0de696",
+      "attackEnabled": false,
+      "defenseEnabled": true
+    },
+    {
+      "id": "player_1011",
+      "avatarId": "d0cc4f5e972e4d7fb228f8d0b59affcc",
+      "attackEnabled": false,
+      "defenseEnabled": true
+    }
+  ],
+  "devFastMode": true
+}

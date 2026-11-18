@@ -1,3 +1,7 @@
+import { newBonusState, syncRaidBots } from './raid-bots.js';
+export { mirrorBots } from './raid-bots.js';
+import { regenBot } from './balance.js';
+import { BotsConfigs, shieldRegenHours, type BotsSource } from './bots-config.js';
 import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
@@ -11,26 +15,34 @@ export const bonusInput = z.strictObject({ requestId: z.string().uuid() });
 export const kindInput = z.strictObject({ kind: z.enum(['Jackpot','Raid']) });
 export const raidBeginInput = z.strictObject({ requestId: z.string().uuid(), botId: z.string().min(1).max(160).optional() });
 export const attackInput = z.strictObject({ requestId: z.string().uuid(), facilityId: z.number().int().min(0).max(4) });
+export const pickInput = bonusInput.extend({ bagId: z.number().int().min(0).max(11) });
+export const costumePurchaseInput = bonusInput.extend({
+  itemId: z.string().regex(/^[a-z0-9_-]{1,100}$/),
+  expectedPrice: z.number().int().positive().max(2147483647).optional(),
+});
+const costumeSlotPrefixes={HEAD:'camel_hat_',GLASS:'camel_glasses_',NECK:'camel_neck_',BODY:'camel_back_',FEET:'camel_shoes_',TAIL:'camel_tail_'} as const;
+export const costumeEquipInput=bonusInput.extend({
+  slot:z.enum(['HEAD','GLASS','NECK','BODY','FEET','TAIL']),
+  itemId:costumePurchaseInput.shape.itemId.nullable(),
+});
 type Item = Record<string, any>;
-export interface BonusStore extends DropStore { list(player: string, prefix: string): Promise<Item[]> }
+type BagPick = {requestId: string; bagId: number; outcome: 'GOLD'|'MISS'; gold: number};
+export interface BonusStore extends DropStore { list(player: string, prefix: string, newestLimit?: number): Promise<Item[]> }
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const meta = (now: string, version = 1) => ({ schemaVersion: 1, version, updatedAt: now });
+function publicRaidReceipt(record: Item|undefined) {
+  if (!record) return undefined;
+  const {bagGold, ...visible}=record;
+  return visible;
+}
 export function jackpotSegment(weights: number[], roll: number) {
   if (!Number.isInteger(roll) || roll < 0 || roll >= 10000) throw new Error('Invalid roll');
   let sum = 0; for (let i = 0; i < weights.length; i++) { sum += weights[i]!; if (roll < sum) return i; }
   throw new Error('Invalid probability table');
 }
-export function mirrorBots(progress: Save['progress'], config: GameConfig<'raid'>, previous: Item[]) {
-  return config.data.botTemplates.map((template, i) => {
-    const botId = `bot:${encodeURIComponent(progress.worldId)}:v${progress.village}:${template.id}`;
-    return previous.find(b => b.botId === botId) ?? { botId, profileTemplateId: template.id,
-      worldId: progress.worldId, village: progress.village, facilityLevels: [...config.data.initialFacilityLevels],
-      shieldCount: config.data.initialShieldCounts[i], stateVersion: 1 };
-  });
-}
 export class BonusService {
   constructor(private players: PlayerRepository, private db: BonusStore, private drops: DropService,
-    private configs: ConfigSource = new GameConfigs(), private clock = Date.now, private roll = () => randomInt(10000)) {}
+    private configs: ConfigSource = new GameConfigs(), private clock = Date.now, private roll = () => randomInt(10000), private botsConfig: BotsSource = new BotsConfigs()) {}
   private now() { return new Date(this.clock()).toISOString(); }
   private async owner(p: Principal) { const id = await this.players.find(p); if (!id) throw new ApiError(404,'PLAYER_NOT_FOUND'); return id; }
   private async retry<T>(action: () => Promise<T>): Promise<T> {
@@ -43,14 +55,15 @@ export class BonusService {
     return this.retry(async () => {
       let state = await this.db.get(player,'BONUS#STATE');
       if (!state) {
-        state = { ...meta(this.now()), queue: [], run: null, jackpot: null, raid: { bots: [], activities: [], activeRaid: null } };
+        state = newBonusState(this.now());
         await this.db.commit(player,[{ sk:'BONUS#STATE',value:state }]);
       }
       if (state.run || state.queue.length) return state;
       const pending = (await this.db.list(player,'BONUS#')).filter(b => b.status === 'PENDING').sort((a,b) => a.updatedAt.localeCompare(b.updatedAt) || a._key.localeCompare(b._key)).slice(0,20);
       if (!pending.length) return state;
       const next = { ...state, ...meta(this.now(),state.version+1), queue: pending.map(b => ({ kind:b.kind,total:b.total,completed:b.completed,
-        totalReward:b.totalReward,roundId:b.roundId,cause:b.cause,announced:b.announced,batchKey:b._key })) };
+        totalReward:b.totalReward,roundId:b.roundId,cause:b.cause,announced:b.announced,batchKey:b._key,
+        ...(b.eventTypes ? {eventTypes:b.eventTypes} : {}) })) };
       await this.db.commit(player,[{sk:'BONUS#STATE',value:next,expectedVersion:state.version},...pending.map(b => {
         const {_key,...value}=b; return {sk:_key,value:{...value,status:'ASSIGNED',...meta(this.now(),b.version+1)},expectedVersion:b.version};
       })]);
@@ -76,11 +89,29 @@ export class BonusService {
     const player=await this.owner(principal);
     for(let i=0;i<5;i++) {
       const state=await this.state(player), drop=await this.drops.active(principal);
+      const [currentRaidConfig, botSettings] = await Promise.all([this.configs.load('raid'), this.botsConfig.load()]);
+      const bots = syncRaidBots(drop.save.progress, currentRaidConfig, botSettings, state.raid.bots, this.clock());
+      if (bots.some((bot, index) => bot !== state.raid.bots[index])) {
+        try { await this.db.commit(player,[{sk:'BONUS#STATE',value:{...state,raid:{...state.raid,bots},...meta(this.now(),state.version+1)},expectedVersion:state.version}]); }
+        catch(e) { if (e instanceof Error && ['TransactionCanceledException','ConditionalCheckFailedException'].includes(e.name)) continue; throw e; }
+        continue;
+      }
+      const active=state.raid.activeRaid;
+      const [bagRaid, costume]=await Promise.all([
+        active?.eventType==='RAID' ? this.db.get(player,`RAID#${active.raidId}`) : undefined,
+        this.db.get(player,'COSTUME'),
+      ]);
       const after=await this.db.get(player,'BONUS#STATE');
       if (state.version!==after?.version) continue;
       const jackpotConfig=state.jackpot && !state.jackpot.acknowledged ? state.jackpot.config : await this.configs.load('jackpot');
-      const raidConfig=state.raid.activeRaid?.config ?? await this.configs.load('raid');
-      return {...drop,bonus:state,settings:{jackpot:jackpotConfig,raid:raidConfig,
+      const raidConfig=state.raid.activeRaid?.config ?? currentRaidConfig;
+      const visibleBots=state.raid.bots.filter((b:Item)=>(b.worldId===drop.save.progress.worldId && b.village===drop.save.progress.village && botSettings.bots.some(t=>t.id===b.profileTemplateId && t.defenseEnabled)) || b.botId===state.raid.activeRaid?.botId);
+      const visibleState:Item={...state,raid:{...state.raid,bots:visibleBots}};
+      const incomingRaid=(await this.db.list(player,'INCOMING#RECEIPT#',40)).sort((a,b)=>b._key.localeCompare(a._key)).slice(0,40).map(({_key,...record})=>record);
+      const latestCollection=await this.db.get(player,'COLLECTION');
+      if (drop.collection?.version !== latestCollection?.version) continue;
+      return {...drop,bonus:visibleState,incomingRaid,bagRaid:publicRaidReceipt(bagRaid)??null,
+        costume:{ownedIds:costume?.ownedIds??[],equipped:costume?.equipped??{},prices:currentRaidConfig.data.costumePrices??{}},settings:{jackpot:jackpotConfig,raid:raidConfig,
         collection:await this.configs.load('collection'),journey:await this.configs.load('journey')}};
     }
     throw new ApiError(409,'STATE_CHANGED_RETRY_SAME_REQUEST');
@@ -115,7 +146,8 @@ export class BonusService {
   }
   private receipt(id:string,type:string,cause:string,config:GameConfig<any>,ctx:Awaited<ReturnType<BonusService['context']>>,wallet:Save['wallet'],result:Item,requestHash:string):Write[] {
     return [{sk:`ECONOMY#OP#${id}`,value:{...meta(this.now()),operationId:id,operationType:type,causeKey:cause,requestHash,
-      configVersion:config.version,configHash:config.contentHash,deltas:{energy:0,diamond:0,yallaPoint:wallet.yallaPoint-ctx.save.wallet.yallaPoint},
+      configVersion:config.version,configHash:config.contentHash,deltas:{energy:0,diamond:0,yallaPoint:wallet.yallaPoint-ctx.save.wallet.yallaPoint,
+        costumePoint:(wallet.costumePoint??0)-(ctx.save.wallet.costumePoint??0)},
       balancesBefore:ctx.save.wallet,balancesAfter:wallet,walletVersionAfter:wallet.version,result,committedAt:this.now()}},
       {sk:`ECONOMY#CAUSE#${cause}`,value:{operationId:id,requestHash}}];
   }
@@ -162,21 +194,33 @@ export class BonusService {
       if(previous) { if(input.botId && previous.operation.botId!==input.botId) throw new ApiError(409,'IDEMPOTENCY_CONFLICT'); return; }
       const state=await this.state(player); this.needRun(state,'Raid');
       if(state.raid.activeRaid) { if(input.botId && state.raid.activeRaid.botId!==input.botId) throw new ApiError(409,'RAID_ACTIVE'); id=state.raid.activeRaid.raidId; return; }
-      const ctx=await this.context(player),config=await this.configs.load('raid');
+      const ctx=await this.context(player),config=await this.configs.load('raid'), botSettings=await this.botsConfig.load();
       if(ctx.collection.raidTickets<config.data.ticketCost) throw new ApiError(409,'INSUFFICIENT_RAID_TICKETS');
-      const bots=mirrorBots(ctx.save.progress,config,state.raid.bots),bot=input.botId?bots.find(b=>b.botId===input.botId):bots[0];
+      const now=this.clock();
+      const bots=syncRaidBots(ctx.save.progress,config,botSettings,state.raid.bots,now),eligible=bots.filter(b=>b.worldId===ctx.save.progress.worldId && b.village===ctx.save.progress.village && botSettings.bots.some(t=>t.id===b.profileTemplateId && t.defenseEnabled)),bot=input.botId?eligible.find(b=>b.botId===input.botId):eligible[0];
       if(!bot) throw new ApiError(400,'INVALID_RAID_TARGET');
-      const operation={raidId:id,attackerId:player,botId:bot.botId,worldId:bot.worldId,village:bot.village,botStateVersion:bot.stateVersion,
+      const eventType=state.run.eventTypes?.[state.run.completed] ?? 'ATTACK';
+      const bags=eventType==='RAID'?config.data.bags:undefined;
+      if(eventType==='RAID' && !bags)throw new ApiError(503,'RAID_BAGS_NOT_CONFIGURED');
+      const operation={raidId:id,eventType,attackerId:player,botId:bot.botId,worldId:bot.worldId,village:bot.village,botStateVersion:bot.stateVersion,
         configurationVersion:config.version,ticketCost:config.data.ticketCost,multiplier:config.data.multiplier,
-        eligibleCosts:bot.facilityLevels.map(()=>config.data.eligibleUpgradeCost),config};
+        eligibleCosts:bot.facilityLevels.map(()=>config.data.eligibleUpgradeCost),config,
+        ...(bags?{bagCount:bags.count,pickLimit:bags.picks}:{})};
+      const bagGold=bags && Array.from({length:bags.count},(_,i)=>i<bags.winners?randomInt(bags.minGold,bags.maxGold+1):0);
+      if(bagGold)for(let i=bagGold.length-1;i>0;i--){
+        const j=randomInt(i+1);
+        [bagGold[i],bagGold[j]]=[bagGold[j]!,bagGold[i]!];
+      }
       await this.write(player,state,{...state,raid:{...state.raid,bots,activeRaid:operation}},ctx,[{sk:`RAID#${id}`,value:{...meta(this.now()),operation,
+        ...(bagGold?{bagGold,picks:[]}:{}),
         acknowledged:false,status:'READY',batchKey:state.run.batchKey,sequence:state.run.completed+1}}]);
-    }); return {...await this.snapshot(principal),result:await this.db.get(player,`RAID#${id}`)};
+    }); return {...await this.snapshot(principal),result:publicRaidReceipt(await this.db.get(player,`RAID#${id}`))};
   }
   async attack(principal:Principal,id:string,input:z.infer<typeof attackInput>) {
     const player=await this.owner(principal);
     await this.retry(async()=>{
       const record=await this.db.get(player,`RAID#${id}`); if(!record) throw new ApiError(404,'RAID_NOT_FOUND');
+      if((record.operation.eventType ?? 'ATTACK') !== 'ATTACK') throw new ApiError(409,'BONUS_EVENT_TYPE_MISMATCH');
       if(record.status==='SETTLED') { if(record.result.selectedFacilityId!==input.facilityId) throw new ApiError(409,'RESULT_CONFLICT'); return; }
       if(record.status!=='READY') throw new ApiError(409,'RAID_CANCELLED');
       const state=await this.state(player);this.needRun(state,'Raid');
@@ -184,15 +228,16 @@ export class BonusService {
       const ctx=await this.context(player),op=record.operation, config=op.config as GameConfig<'raid'>;
       if(op.worldId!==ctx.save.progress.worldId || op.village!==ctx.save.progress.village) throw new ApiError(409,'PROGRESS_CHANGED');
       if(ctx.collection.raidTickets<op.ticketCost) throw new ApiError(409,'INSUFFICIENT_RAID_TICKETS');
-      const bot=state.raid.bots.find((b:Item)=>b.botId===op.botId);
+      const storedBot=state.raid.bots.find((b:Item)=>b.botId===op.botId);
+      const bot=storedBot && regenBot(storedBot as {shieldCount:number; shieldRegenAt?:string | null},this.clock(),shieldRegenHours(await this.botsConfig.load())) as Item;
       if(!bot || bot.stateVersion!==op.botStateVersion) throw new ApiError(409,'BOT_STATE_CHANGED');
       const blocked=bot.shieldCount>0,reward=blocked?0:op.eligibleCosts[input.facilityId]*op.multiplier;
       const result={raidId:id,attackerId:player,defenderId:bot.botId,attackerEntityType:'LocalPlayer',defenderEntityType:'SystemBot',
         selectedFacilityId:input.facilityId,worldId:op.worldId,village:op.village,result:blocked?'BlockedByShield':'Success',rewardAmount:reward,
-        shieldConsumed:blocked,timestamp:this.now()};
+        outcome:blocked?'BLOCKED':'HIT',shieldConsumed:blocked,timestamp:this.now()};
       const wallet=walletSchema.parse({...ctx.save.wallet,yallaPoint:ctx.save.wallet.yallaPoint+reward,...meta(this.now(),ctx.save.wallet.version+1)});
       const collection=collectionSchema.parse({...ctx.collection,raidTickets:ctx.collection.raidTickets-op.ticketCost,...meta(this.now(),ctx.collection.version+1)});
-      const raid={...state.raid,bots:state.raid.bots.map((b:Item)=>b.botId===bot.botId?{...b,shieldCount:b.shieldCount-(blocked?1:0),stateVersion:b.stateVersion+1}:b),
+      const raid={...state.raid,bots:state.raid.bots.map((b:Item)=>b.botId===bot.botId?{...bot,shieldCount:bot.shieldCount-(blocked?1:0),shieldRegenAt:blocked && bot.shieldCount>=3 ? this.now() : bot.shieldRegenAt,stateVersion:bot.stateVersion+1}:b),
         activities:[...state.raid.activities,result].slice(-40)};
       await this.write(player,state,{...state,raid},ctx,[{sk:'WALLET',value:wallet,expectedVersion:ctx.save.wallet.version},
         {sk:'COLLECTION',value:collection,expectedVersion:ctx.collection.version},
@@ -204,10 +249,105 @@ export class BonusService {
     const player=await this.owner(principal);
     await this.retry(async()=>{const record=await this.db.get(player,`RAID#${id}`);if(!record)throw new ApiError(404,'RAID_NOT_FOUND');
       if(record.status==='CANCELLED')return;if(record.status!=='READY')throw new ApiError(409,'RAID_ALREADY_SETTLED');
+      if(record.picks?.length)throw new ApiError(409,'RAID_ALREADY_STARTED');
       const state=await this.state(player),ctx=await this.context(player);
       if(state.raid.activeRaid?.raidId!==id)throw new ApiError(409,'RAID_NOT_ACTIVE');
       await this.write(player,state,{...state,raid:{...state.raid,activeRaid:null}},ctx,[{sk:`RAID#${id}`,value:{...record,...meta(this.now(),record.version+1),status:'CANCELLED'},expectedVersion:record.version}]);
     });return this.snapshot(principal);
+  }
+  async pick(principal:Principal,id:string,input:z.infer<typeof pickInput>) {
+    const player=await this.owner(principal), key=`RAID#${id}`;
+    const selection=await this.retry(async()=>{
+      const record=await this.db.get(player,key);
+      if(!record)throw new ApiError(404,'RAID_NOT_FOUND');
+      const op=record.operation;
+      if(op.eventType!=='RAID')throw new ApiError(409,'BONUS_EVENT_TYPE_MISMATCH');
+      const picks=record.picks as BagPick[];
+      const previous=picks.find(p=>p.requestId===input.requestId);
+      if(previous){
+        if(previous.bagId!==input.bagId)throw new ApiError(409,'IDEMPOTENCY_CONFLICT');
+        return previous;
+      }
+      if(record.status!=='READY')throw new ApiError(409,record.status==='CANCELLED'?'RAID_CANCELLED':'RAID_ALREADY_SETTLED');
+      const config=op.config as GameConfig<'raid'>, rules=config.data.bags!;
+      if(input.bagId>=rules.count)throw new ApiError(400,'INVALID_RAID_BAG');
+      if(picks.some(p=>p.bagId===input.bagId))throw new ApiError(409,'RAID_BAG_ALREADY_PICKED');
+      const state=await this.state(player);
+      this.needRun(state,'Raid');
+      if(state.raid.activeRaid?.raidId!==id)throw new ApiError(409,'RAID_NOT_ACTIVE');
+      const ctx=await this.context(player),p=ctx.save.progress;
+      if(p.worldId!==op.worldId || p.village!==op.village)throw new ApiError(409,'PROGRESS_CHANGED');
+      if(ctx.collection.raidTickets<op.ticketCost)throw new ApiError(409,'INSUFFICIENT_RAID_TICKETS');
+      const gold=record.bagGold[input.bagId] as number;
+      const pick:BagPick={...input,gold,outcome:gold>0?'GOLD':'MISS'};
+      const nextPicks=[...picks,pick],now=this.now();
+      const next={...record,...meta(now,record.version+1),picks:nextPicks};
+      const writes:Write[]=[{sk:key,value:next,expectedVersion:record.version}];
+      if(nextPicks.length===rules.picks){
+        const rewardAmount=Math.min(rules.goldCap,nextPicks.reduce((sum,p)=>sum+p.gold,0));
+        const costumePoint=nextPicks.filter(p=>p.outcome==='GOLD').length*rules.costumePointPerWin;
+        const result={raidId:id,eventType:'RAID',defenderId:op.botId,rewardAmount,costumePoint,timestamp:now};
+        Object.assign(next,{status:'SETTLED',result});
+        const before=ctx.save.wallet;
+        const wallet=walletSchema.parse({...before,...meta(now,before.version+1),
+          yallaPoint:before.yallaPoint+rewardAmount,costumePoint:(before.costumePoint??0)+costumePoint});
+        const collection=collectionSchema.parse({...ctx.collection,...meta(now,ctx.collection.version+1),raidTickets:ctx.collection.raidTickets-op.ticketCost});
+        writes.push({sk:'WALLET',value:wallet,expectedVersion:before.version},{sk:'COLLECTION',value:collection,expectedVersion:ctx.collection.version},
+          ...this.receipt(`raid:${id}`,'raid',`bonus:${record.batchKey}:${record.sequence}`,config,ctx,wallet,result,hash({id,picks:nextPicks})));
+      }
+      await this.write(player,state,{...state},ctx,writes);
+      return pick;
+    });
+    return {...await this.snapshot(principal),selection,result:publicRaidReceipt(await this.db.get(player,key))};
+  }
+  async purchaseCostume(principal:Principal,input:z.infer<typeof costumePurchaseInput>) {
+    const player=await this.owner(principal),opId=`costume:${input.requestId}`,key=`ECONOMY#OP#${opId}`,requestHash=hash(input);
+    const result=await this.retry(async()=>{
+      const previous=await this.db.get(player,key);
+      if(previous){
+        if(previous.requestHash!==requestHash)throw new ApiError(409,'IDEMPOTENCY_CONFLICT');
+        return previous.result;
+      }
+      const config=await this.configs.load('raid'), prices=config.data.costumePrices??{};
+      if(!Object.hasOwn(prices,input.itemId))throw new ApiError(409,'COSTUME_NOT_FOR_SALE');
+      const price=prices[input.itemId]!;
+      if(input.expectedPrice!==undefined && input.expectedPrice!==price)throw new ApiError(409,'COSTUME_PRICE_CHANGED');
+      const state=await this.state(player),ctx=await this.context(player),before=ctx.save.wallet;
+      const inventory=await this.db.get(player,'COSTUME'),ownedIds=inventory?.ownedIds??[];
+      if(ownedIds.includes(input.itemId))throw new ApiError(409,'COSTUME_ALREADY_OWNED');
+      if((before.costumePoint??0)<price)throw new ApiError(409,'INSUFFICIENT_COSTUME_POINT');
+      const now=this.now(),result={itemId:input.itemId,costumePointSpent:price};
+      const wallet=walletSchema.parse({...before,...meta(now,before.version+1),costumePoint:before.costumePoint-price});
+      await this.write(player,state,{...state},ctx,[
+        {sk:'WALLET',value:wallet,expectedVersion:before.version},
+        {sk:'COSTUME',value:{...inventory,...meta(now,(inventory?.version??0)+1),ownedIds:[...ownedIds,input.itemId]},expectedVersion:inventory?.version},
+        ...this.receipt(opId,'costume-purchase',opId,config,ctx,wallet,result,requestHash)]);
+      return result;
+    });
+    return {...await this.snapshot(principal),result};
+  }
+  async equipCostume(principal:Principal,input:z.infer<typeof costumeEquipInput>) {
+    const player=await this.owner(principal),key=`COSTUME#EQUIP#${input.requestId}`,requestHash=hash(input);
+    const result=await this.retry(async()=>{
+      const previous=await this.db.get(player,key);
+      if(previous){
+        if(previous.requestHash!==requestHash)throw new ApiError(409,'IDEMPOTENCY_CONFLICT');
+        return previous.result;
+      }
+      const inventory=await this.db.get(player,'COSTUME'),ownedIds=inventory?.ownedIds??[];
+      if(input.itemId!==null){
+        if(!input.itemId.startsWith(costumeSlotPrefixes[input.slot]))throw new ApiError(409,'COSTUME_SLOT_MISMATCH');
+        if(!ownedIds.includes(input.itemId))throw new ApiError(409,'COSTUME_NOT_OWNED');
+      }
+      const now=this.now(),result={slot:input.slot,itemId:input.itemId};
+      await this.db.commit(player,[
+        {sk:'COSTUME',expectedVersion:inventory?.version,value:{...inventory,...meta(now,(inventory?.version??0)+1),
+          ownedIds,equipped:{...inventory?.equipped,[input.slot]:input.itemId}}},
+        {sk:key,value:{...meta(now),requestHash,result}},
+      ]);
+      return result;
+    });
+    return {...await this.snapshot(principal),result};
   }
 }
 export function createBonusService(table:string,drops:DropService,configs:ConfigSource) {

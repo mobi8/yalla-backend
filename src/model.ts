@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
 import { worldIds } from './world-ids.js';
+import { buildingIds } from './world-config.js';
 export const worlds = worldIds;
 const int = z.number().int().min(0).max(2147483647);
 // C# long and decimal must never pass through a JavaScript Number.
@@ -23,6 +24,10 @@ export const progressSchema = z.strictObject({
   ...state, worldId: z.enum(worlds), village: z.number().int().min(1).max(5),
   facilityLevels: z.array(z.number().int().min(1).max(5)).length(5),
   worldRunId: z.string().min(1), worldRunComplete: z.boolean(),
+  villageDamage: z.strictObject({
+    worldRunId: z.string().min(1), village: z.number().int().min(1).max(5),
+    buildings: z.partialRecord(z.enum(buildingIds), z.string().regex(/^\d+$/)),
+  }).optional(),
   worldCompletionCounts: z.partialRecord(z.enum(worlds), int),
   highestUnlockedWorld: z.number().int().min(0).max(99),
   distance: decimalString, lastDistanceMilestone: longString, constructionStars: longString,
@@ -33,7 +38,12 @@ export const progressSchema = z.strictObject({
 });
 export type Profile = z.infer<typeof profileSchema>;
 export type Progress = z.infer<typeof progressSchema>;
+export function currentVillageDamage(p: Progress) {
+  return p.villageDamage?.worldRunId === p.worldRunId && p.villageDamage.village === p.village
+    ? p.villageDamage.buildings : {};
+}
 export const walletSchema = z.strictObject({ ...state, energy: int, diamond: int, yallaPoint: int,
+  costumePoint: int.default(0),
   energyRechargeAnchor: longString, energyRechargeHighWater: longString });
 export type Wallet = z.infer<typeof walletSchema>;
 export interface Save { profile: Profile; progress: Progress; wallet: Wallet }

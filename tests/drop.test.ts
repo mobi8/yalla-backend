@@ -9,15 +9,15 @@ import type { PlayerRepository } from '../src/repository.js';
 import type { S3Client } from '@aws-sdk/client-s3';
 const configs: ConfigSource = { load: async <K extends ConfigName>(name:K) => parseConfig(name,readFileSync(new URL(`../config/dev/${name}.json`,import.meta.url),'utf8'),'dev') };
 const rules = parseConfig('collection',readFileSync(new URL('../config/dev/collection.json',import.meta.url),'utf8'),'dev').data;
-const journey = parseConfig('journey',readFileSync(new URL('../config/dev/journey.json',import.meta.url),'utf8'),'dev').data;
+const journey = { distancePerChest: '300', repeat: 'REPEATING' as const, rewardType: 'Energy' as const, rewardAmount: 20 };
 const settle = (...args: Parameters<typeof settleConfigured> extends [...infer _] ? [Parameters<typeof settleConfigured>[0],Parameters<typeof settleConfigured>[1],Parameters<typeof settleConfigured>[2],Parameters<typeof settleConfigured>[3],string,number,string] : never) => settleConfigured(...args,rules,journey);
 process.env.ENVIRONMENT = 'dev'; process.env.RESULT_POLICY = 'PERMISSIVE';
 const principal: Principal = { provider: 'guest', subject: 'p' };
 const input = (id = '11111111-1111-4111-8111-111111111111') => ({ requestId: id, prediction: 'RED' as const, energyCost: 3 });
 const actual = { ball: 'Ball010', color: 'BLUE' as const, symbol: 'A' as const };
-const poolText = JSON.stringify(Array.from({ length: 100 }, (_, i) => ({ ...actual, setId: i + 1, order: Array.from({ length: 25 }, (_, j) => j) })));
-const assigned = validatePool(poolText, 'result-pools/v1/result_pool_100_1.json')[0]!;
-function fixture() {
+const poolText = JSON.stringify(Array.from({ length: 1_000 }, (_, i) => ({ ...actual, setId: i + 1, order: Array.from({ length: 25 }, (_, j) => j) })));
+const assigned = validatePool(poolText, 'result-pools/v1/result_pool_1000.json')[0]!;
+function fixture(rollEvent?: () => number) {
   let time = Date.parse('2026-11-17T00:00:00Z');
   const save = newSave(new Date(time).toISOString()), player = save.profile.playerId;
   const items = new Map<string, any>([['PROFILE', save.profile], ['PROGRESS', save.progress], ['WALLET', save.wallet]]);
@@ -31,7 +31,7 @@ function fixture() {
   const players: PlayerRepository = { find: async p => p.subject === 'p' ? player : undefined,
     read: async () => structuredClone({ profile: items.get('PROFILE'), progress: items.get('PROGRESS'), wallet: items.get('WALLET') }) as Save,
     create: async () => {} };
-  const service = new DropService(players, db, { pick: async () => structuredClone(assigned) }, () => time, undefined, configs);
+  const service = new DropService(players, db, { pick: async () => structuredClone(assigned) }, () => time, undefined, configs, rollEvent);
   return { service, items, db, advance: (ms: number) => { time += ms; } };
 }
 describe('server drop economy', () => {
@@ -59,6 +59,36 @@ describe('server drop economy', () => {
   });
 });
 describe('drop transaction lifecycle', () => {
+  it('persists one ordered event per YALLA set and reuses the batch on resubmission', async () => {
+    const rolls = [4999, 5000];
+    const f = fixture(() => {
+      const roll = rolls.shift();
+      if (roll === undefined) throw new Error('Unexpected event draw');
+      return roll;
+    });
+    const sid = (await f.service.open(principal)).session!.sessionId;
+    Object.assign(f.items.get('COLLECTION'), { yallaYCount: 2, yallaACount: 4, yallaLCount: 1 });
+    const rid = (await f.service.begin(principal, sid, input())).round!.roundId;
+    const result = { requestId: input().requestId, actual: { ...actual, symbol: 'L' as const }, physicsVersion: assigned.physicsVersion };
+    await f.service.submit(principal, sid, rid, result);
+    await f.service.submit(principal, sid, rid, result);
+    expect(f.items.get(`BONUS#${rid}#raidTickets`)).toMatchObject({ total: 2, eventTypes: ['ATTACK', 'RAID'] });
+    expect(f.items.get('COLLECTION')).toMatchObject({ raidTickets: 2, yallaYCount: 0, yallaACount: 0, yallaLCount: 0 });
+    expect(rolls).toEqual([]);
+  });
+  it('persists the same chest draw and wallet credit for concurrent and repeated settlement', async () => {
+    const f = fixture(); f.items.get('PROGRESS').distance = '295';
+    const sid = (await f.service.open(principal)).session!.sessionId;
+    const started = await f.service.begin(principal, sid, input());
+    const rid = started.round!.roundId, result = { requestId: input().requestId, actual, physicsVersion: assigned.physicsVersion };
+    const [a,b] = await Promise.all([f.service.submit(principal,sid,rid,result),f.service.submit(principal,sid,rid,result)]);
+    const again = await f.service.submit(principal,sid,rid,result);
+    expect(a.round.journeyAward).toEqual(b.round.journeyAward);
+    expect(again.round.journeyAward).toEqual(a.round.journeyAward);
+    expect(a.round.journeyAward.rewards).toHaveLength(1);
+    expect(f.items.get('WALLET').yallaPoint).toBe(30 + a.round.reward.distanceYallaPoint);
+    expect(f.items.get('WALLET').energy).toBe(47 + a.round.reward.distanceEnergy);
+  });
   it('opens one session under concurrent requests and never changes existing initial balances', async () => {
     const f = fixture(); const results = await Promise.all([f.service.open(principal), f.service.open(principal)]);
     expect(results[0].session?.sessionId).toBe(results[1].session?.sessionId); expect(f.items.get('WALLET').energy).toBe(50);
@@ -140,23 +170,32 @@ describe('drop transaction lifecycle', () => {
     const active = await f.service.active(principal); expect(active.round).toMatchObject({ roundId: r.round!.roundId, order: assigned.order, poolVersion: assigned.poolVersion });
   });
 });
-describe('multi-file pool validation and cache', () => {
+describe('result pool validation and cache', () => {
   it('rejects wrong count, duplicate IDs and malformed permutations', () => {
     expect(() => validatePool('[]', 'x')).toThrow(); const rows = JSON.parse(poolText); rows[1].setId = 1;
     expect(() => validatePool(JSON.stringify(rows), 'x')).toThrow(); rows[1].setId = 2; rows[1].order[0] = 1;
     expect(() => validatePool(JSON.stringify(rows), 'x')).toThrow();
   });
-  it('discovers additions after TTL and excludes damaged files without listing per round', async () => {
-    let now = 0, listings = 0, added = false;
+  it('loads only the 1,000-set file and refreshes after the TTL', async () => {
+    let now = 0, listings = 0;
+    const reads: string[] = [];
+    const key = 'v1/result_pool_1000.json';
     const s3 = { send: async (cmd: any) => {
-      if (cmd.constructor.name === 'ListObjectsV2Command') { listings++; return { Contents: [
-        { Key: 'v1/result_pool_100_1.json', Size: 100 }, ...(added ? [{ Key: 'v1/result_pool_100_2.json', Size: 100 }] : []),
-        { Key: 'v1/result_pool_100_3.json', Size: 100 }] }; }
-      return { Body: { transformToString: async () => cmd.input.Key.endsWith('_3.json') ? '{}' : poolText } };
+      if (cmd.constructor.name === 'ListObjectsV2Command') {
+        listings++;
+        return { Contents: [{ Key: 'v1/result_pool_100_1.json', Size: 100 }, { Key: key, Size: 100 }] };
+      }
+      reads.push(cmd.input.Key);
+      return { Body: { transformToString: async () => poolText } };
     } } as unknown as S3Client;
     const pools = new ResultPools(s3, 'bucket', 'v1/', () => now);
-    await pools.pick(); await pools.pick(); expect(listings).toBe(1);
-    added = true; now = 60001; await pools.pick(); expect(listings).toBe(2);
-    expect((pools as any).cached).toHaveLength(200);
+    expect((await pools.pick()).poolFileId).toBe(key);
+    await pools.pick();
+    expect(listings).toBe(1);
+    expect(reads).toEqual([key]);
+    now = 60001;
+    expect((await pools.pick()).poolFileId).toBe(key);
+    expect(listings).toBe(2);
+    expect(reads).toEqual([key, key]);
   });
 });

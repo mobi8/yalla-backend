@@ -17,6 +17,16 @@
       "Type": "String"
     }
   },
+  "Conditions": {
+    "IsDev": {
+      "Fn::Equals": [
+        {
+          "Ref": "Environment"
+        },
+        "dev"
+      ]
+    }
+  },
   "Resources": {
     "PlayerTable": {
       "Type": "AWS::DynamoDB::Table",
@@ -32,6 +42,22 @@
           {
             "AttributeName": "SK",
             "AttributeType": "S"
+          },
+          {
+            "AttributeName": "duePartition",
+            "AttributeType": "S"
+          },
+          {
+            "AttributeName": "dueAt",
+            "AttributeType": "S"
+          },
+          {
+            "AttributeName": "activityPartition",
+            "AttributeType": "S"
+          },
+          {
+            "AttributeName": "lastActiveAt",
+            "AttributeType": "S"
           }
         ],
         "KeySchema": [
@@ -44,6 +70,46 @@
             "KeyType": "RANGE"
           }
         ],
+        "GlobalSecondaryIndexes": [
+          {
+            "IndexName": "IncomingDue",
+            "KeySchema": [
+              {
+                "AttributeName": "duePartition",
+                "KeyType": "HASH"
+              },
+              {
+                "AttributeName": "dueAt",
+                "KeyType": "RANGE"
+              }
+            ],
+            "Projection": {
+              "ProjectionType": "INCLUDE",
+              "NonKeyAttributes": [
+                "playerId"
+              ]
+            }
+          },
+          {
+            "IndexName": "PlayerActivity",
+            "KeySchema": [
+              {
+                "AttributeName": "activityPartition",
+                "KeyType": "HASH"
+              },
+              {
+                "AttributeName": "lastActiveAt",
+                "KeyType": "RANGE"
+              }
+            ],
+            "Projection": {
+              "ProjectionType": "KEYS_ONLY"
+            }
+          }
+        ],
+        "StreamSpecification": {
+          "StreamViewType": "NEW_AND_OLD_IMAGES"
+        },
         "PointInTimeRecoverySpecification": {
           "PointInTimeRecoveryEnabled": true
         },
@@ -163,6 +229,170 @@
         }
       }
     },
+    "IncomingLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/yalla-${Environment}-incoming-raid"
+        },
+        "RetentionInDays": 30
+      }
+    },
+    "IncomingRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "IncomingRaid",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${IncomingLogs.Arn}:*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:GetItem",
+                    "dynamodb:PutItem",
+                    "dynamodb:ConditionCheckItem"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "PlayerTable",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:Query"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "${PlayerTable.Arn}/index/IncomingDue"
+                    },
+                    {
+                      "Fn::Sub": "${PlayerTable.Arn}/index/PlayerActivity"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:s3:::yalla-result-pools-533266967583/game-config/${Environment}/v1/bots.json"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "IncomingFunction": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": "IncomingLogs",
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "yalla-${Environment}-incoming-raid"
+        },
+        "Runtime": "nodejs24.x",
+        "Architectures": [
+          "arm64"
+        ],
+        "Handler": "dist/incoming-raid.handler",
+        "MemorySize": 256,
+        "Timeout": 300,
+        "Role": {
+          "Fn::GetAtt": [
+            "IncomingRole",
+            "Arn"
+          ]
+        },
+        "Code": {
+          "S3Bucket": {
+            "Ref": "ArtifactBucket"
+          },
+          "S3Key": {
+            "Ref": "ArtifactKey"
+          }
+        },
+        "Environment": {
+          "Variables": {
+            "PLAYER_TABLE": {
+              "Ref": "PlayerTable"
+            },
+            "GAME_CONFIG_BUCKET": "yalla-result-pools-533266967583",
+            "ENVIRONMENT": {
+              "Ref": "Environment"
+            }
+          }
+        }
+      }
+    },
+    "IncomingRule": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "ScheduleExpression": {
+          "Fn::If": [
+            "IsDev",
+            "rate(1 minute)",
+            "rate(5 minutes)"
+          ]
+        },
+        "State": "ENABLED",
+        "Targets": [
+          {
+            "Id": "incoming-raid",
+            "Arn": {
+              "Fn::GetAtt": [
+                "IncomingFunction",
+                "Arn"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "IncomingPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName": {
+          "Ref": "IncomingFunction"
+        },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "events.amazonaws.com",
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "IncomingRule",
+            "Arn"
+          ]
+        }
+      }
+    },
     "AuthRole": {
       "Type": "AWS::IAM::Role",
       "Properties": {
@@ -224,6 +454,20 @@
                       ]
                     }
                   }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:aws:s3:::yalla-result-pools-533266967583/game-config/${Environment}/v1/raid.json"
+                    },
+                    {
+                      "Fn::Sub": "arn:aws:s3:::yalla-result-pools-533266967583/game-config/${Environment}/v1/bots.json"
+                    }
+                  ]
                 },
                 {
                   "Effect": "Allow",
@@ -413,6 +657,33 @@
                       "PlayerTable",
                       "Arn"
                     ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:PutItem"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "PlayerTable",
+                      "Arn"
+                    ]
+                  },
+                  "Condition": {
+                    "ForAllValues:StringLike": {
+                      "dynamodb:LeadingKeys": [
+                        "PLAYER#*"
+                      ]
+                    },
+                    "ForAllValues:StringEquals": {
+                      "dynamodb:Attributes": [
+                        "PK",
+                        "SK",
+                        "activityPartition",
+                        "lastActiveAt"
+                      ]
+                    }
                   }
                 },
                 {
@@ -610,6 +881,33 @@
           "Ref": "Api"
         },
         "RouteKey": "POST /players/guest",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "PlayerHeartbeatRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /players/me/heartbeat",
         "Target": {
           "Fn::Join": [
             "/",
@@ -1116,6 +1414,87 @@
         ]
       }
     },
+    "RaidPickRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /bonuses/raids/{operationId}/pick",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "CostumePurchaseRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /bonuses/costumes/purchase",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "CostumeEquipRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /bonuses/costumes/equip",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
     "RaidAckRoute": {
       "Type": "AWS::ApiGatewayV2::Route",
       "Properties": {
@@ -1204,6 +1583,33 @@
           "Ref": "Api"
         },
         "RouteKey": "POST /worlds/upgrade",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "WorldRepairRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /worlds/repair",
         "Target": {
           "Fn::Join": [
             "/",

@@ -1,11 +1,16 @@
 {
   "schemaVersion": 1,
   "environment": "dev",
-  "version": "journey-v1",
+  "version": "journey-v2",
   "data": {
     "distancePerChest": "300",
-    "rewardType": "Energy",
-    "rewardAmount": 20,
+    "rewards": [
+      { "rewardType": "YallaPoint", "rewardAmount": 100, "weight": 3500 },
+      { "rewardType": "YallaPoint", "rewardAmount": 250, "weight": 2500 },
+      { "rewardType": "YallaPoint", "rewardAmount": 500, "weight": 1500 },
+      { "rewardType": "Energy", "rewardAmount": 3, "weight": 2000 },
+      { "rewardType": "Energy", "rewardAmount": 5, "weight": 500 }
+    ],
     "repeat": "REPEATING"
   }
 }

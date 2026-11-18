@@ -1,9 +1,13 @@
+import { GameConfigs, type ConfigSource } from './game-config.js';
+import { BotsConfigs, type BotsSource } from './bots-config.js';
+import { newBonusState, syncRaidBots } from './raid-bots.js';
 import { createHash } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, TransactGetCommand, TransactWriteCommand, NumberValue,
   type TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
 import { profileSchema, progressSchema, walletSchema, type Principal, type Save } from './model.js';
 import { starterItems } from './starter.js';
+import { newIncomingSchedule } from './incoming-raid.js';
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string) { super(code); }
@@ -32,7 +36,8 @@ const exact = (value: unknown): unknown => value instanceof NumberValue ? plainD
   typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : value;
 
 export class DynamoPlayerRepository implements PlayerRepository {
-  constructor(private client: DynamoDBDocumentClient, private table: string) {
+  constructor(private client: DynamoDBDocumentClient, private table: string,
+    private configs: ConfigSource = new GameConfigs(), private botsConfig: BotsSource = new BotsConfigs()) {
     if (!table.trim()) throw new Error('PLAYER_TABLE is required');
   }
   async find(principal: Principal): Promise<string | undefined> {
@@ -63,6 +68,8 @@ export class DynamoPlayerRepository implements PlayerRepository {
     const put = (Item: Record<string, unknown>) => ({ Put: { TableName: this.table, Item,
       ConditionExpression: 'attribute_not_exists(PK)' } });
     walletSchema.parse(save.wallet);
+    const [raidConfig, botSettings] = await Promise.all([this.configs.load('raid'), this.botsConfig.load()]);
+    const bots = syncRaidBots(progress, raidConfig, botSettings, [], Date.parse(profile.createdAt));
     const writes: Writes = [
       put({ ...authKey(principal), playerId: profile.playerId, provider: principal.provider, createdAt: profile.createdAt,
         schemaVersion: 1, version: 1, updatedAt: profile.createdAt }),
@@ -70,6 +77,8 @@ export class DynamoPlayerRepository implements PlayerRepository {
       put({ ...playerKey(profile.playerId, 'PROGRESS'), ...progress, distance: NumberValue.from(progress.distance),
         lastDistanceMilestone: NumberValue.from(progress.lastDistanceMilestone), constructionStars: NumberValue.from(progress.constructionStars) }),
       ...starterItems(save, principal).map(put),
+      put({ ...playerKey(profile.playerId, 'BONUS#STATE'), ...newBonusState(profile.createdAt, bots) }),
+      put({ ...playerKey(profile.playerId, 'INCOMING#SCHEDULE'), ...newIncomingSchedule(profile.playerId, Date.parse(profile.createdAt)) }),
     ];
     await this.client.send(new TransactWriteCommand({ TransactItems: writes,
       ClientRequestToken: createHash('sha256').update(JSON.stringify(writes)).digest('hex').slice(0, 36) }));

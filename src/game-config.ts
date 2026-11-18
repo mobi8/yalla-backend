@@ -11,17 +11,27 @@ export const collectionConfigSchema = z.strictObject({
   crown: z.strictObject({ required: positive.max(3), rewardType: z.literal('JackpotTicket'), rewardAmount: positive,
     maximumTickets: amount, overflow: z.literal('REJECT') }),
   yalla: z.strictObject({ required: z.strictObject({Y:z.literal(1),A:z.literal(2),L:z.literal(2)}), maximumLetters: letter(5, 10), rewardType: z.literal('RaidTicket'),
-    rewardAmount: positive, maximumTickets: amount, overflow: z.literal('DISCARD_LETTERS') }),
+    rewardAmount: z.literal(1), maximumTickets: amount, overflow: z.literal('DISCARD_LETTERS') }),
   star: z.strictObject({ required: positive.max(5), rewardType: z.literal('Energy'), rewardAmount: amount }),
   camel: z.strictObject({ required: positive.max(5), rewardType: z.literal('Shield'), rewardAmount: positive.max(3),
     maximumShields: amount.max(3), overflowRewardType: z.literal('Energy'), overflowRewardAmount: amount }),
 }).refine(v => ['Y','A','L'].every(k => v.yalla.required[k as 'Y'] <= v.yalla.maximumLetters[k as 'Y']), 'Letter requirement exceeds capacity');
-export const journeyConfigSchema = z.strictObject({ distancePerChest: decimalString.refine(v => /[1-9]/.test(v)),
-  rewardType: z.enum(['Energy', 'YallaPoint']), rewardAmount: amount, repeat: z.enum(['REPEATING','ONCE']) });
+const journeyBase = { distancePerChest: decimalString.refine(v => /[1-9]/.test(v)), repeat: z.enum(['REPEATING','ONCE']) };
+export const journeyConfigSchema = z.union([
+  z.strictObject({ ...journeyBase, rewardType: z.enum(['Energy', 'YallaPoint']), rewardAmount: amount }),
+  z.strictObject({ ...journeyBase, rewards: z.array(z.strictObject({ rewardType: z.enum(['Energy', 'YallaPoint']),
+    rewardAmount: positive, weight: positive.max(10000) })).min(1).max(100) })
+    .refine(v => v.rewards.reduce((sum, reward) => sum + reward.weight, 0) === 10000, 'Journey weights must sum to 10000'),
+]);
 export const jackpotConfigSchema = z.strictObject({ ticketCost: z.literal(1), weights: z.array(amount.max(10000)).length(6),
   rewards: z.array(amount).length(6), rewardType: z.literal('YallaPoint') })
   .refine(v => v.weights.reduce((a,b) => a+b,0) === 10000, 'Jackpot weights must sum to 10000');
 export const raidConfigSchema = z.strictObject({ ticketCost: z.literal(1), multiplier: positive, shieldMaximum: amount.max(3),
+  attackWeight: amount.max(10000).optional(),
+  bags: z.strictObject({count: positive.max(12), winners: positive.max(12), picks: positive.max(12),
+    minGold: positive, maxGold: positive, goldCap: positive, costumePointPerWin: amount})
+    .refine(b => b.winners <= b.count && b.picks <= b.count && b.minGold <= b.maxGold, 'Invalid RAID bag rules').optional(),
+  costumePrices: z.record(z.string().regex(/^[a-z0-9_-]{1,100}$/), positive).optional(),
   initialFacilityLevels: z.array(positive.max(5)).length(5), initialShieldCounts: z.array(amount.max(3)).length(6),
   eligibleUpgradeCost: positive, levelSource: z.literal('CONFIG_INITIAL'), shieldRule: z.literal('CONSUME_ONE_BLOCK_ALL'),
   botTemplates: z.array(z.strictObject({ id: z.enum(botIds), avatarId: z.string().regex(/^[a-f0-9]{32}$/) })).length(6),
