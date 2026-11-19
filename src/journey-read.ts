@@ -187,22 +187,31 @@ export class JourneyReadService {
   async activity(principal: Principal, query: ActivityQuery) {
     const player = await this.owner(principal);
     const partition = activityPartition(player);
-    const cursor = before(query.cursor, partition);
-    const { rows } = await this.store.index({ partition, bounds: { before: cursor }, limit: query.limit + 1 });
-    const visible = rows.slice(0, query.limit);
-    const records = await Promise.all(visible.map(async row => {
-      if (row.PK !== `PLAYER#${player}`) return;
-      const receipt = await this.store.get(player, row.SK);
-      return receipt ? privateActivity(player, row.SK, receipt) : undefined;
-    }));
+    let scanCursor = before(query.cursor, partition);
+    let nextKey: string | undefined;
+    const records: {key:string;event:NonNullable<ReturnType<typeof privateActivity>>}[] = [];
+    // Retained history can occupy raw index slots, so paginate over accepted events.
+    for (let page = 0; page < 5 && records.length <= query.limit; page++) {
+      const {rows} = await this.store.index({partition,bounds:{before:scanCursor},limit:query.limit+1});
+      const batch = await Promise.all(rows.map(async row => {
+        if (row.PK !== `PLAYER#${player}` || !/^(INCOMING#(?:RECEIPT|WALLET_RAID)#|RAID#)/.test(row.SK)) return;
+        const receipt = await this.store.get(player,row.SK);
+        const event = receipt && privateActivity(player,row.SK,receipt);
+        if (event) return {key:row.journeySK,event};
+      }));
+      records.push(...batch.filter(record => record !== undefined));
+      scanCursor = rows.at(-1)?.journeySK;
+      nextKey = rows.length > query.limit ? scanCursor : undefined;
+      if (!nextKey) break;
+    }
     const profile = await this.store.get(player, 'PROFILE');
     const named = (party: { id: string; type: string }) => ({
       ...party, nickname: party.type === 'BOT' ? party.id : profile?.nickname ?? null,
     });
-    const events = records.filter(record => record !== undefined).map(event => ({
+    const events = records.slice(0,query.limit).map(({event}) => ({
       ...event, attacker: named(event.attacker), defender: named(event.defender),
     }));
-    return { events, nextCursor: cursorFor(partition, rows.length > query.limit ? visible.at(-1)?.journeySK : undefined) };
+    return { events, nextCursor: cursorFor(partition, records.length > query.limit ? records[query.limit-1]?.key : nextKey) };
   }
 }
 

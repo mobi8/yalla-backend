@@ -154,8 +154,85 @@ for name, route, prefix in routes:
     if prefix == "Player":
         properties.update({"AuthorizationType": "JWT", "AuthorizerId": ref("JwtAuthorizer"), "AuthorizationScopes": ["aws.cognito.signin.user.admin"]})
     resources[name + "Route"] = {"Type": "AWS::ApiGatewayV2::Route", "Properties": properties}
+parameters["NotificationArtifactKey"] = {"Type": "String", "Default": ""}
+notification_artifact = {"Fn::If": ["HasNotificationArtifact", ref("NotificationArtifactKey"), ref("ArtifactKey")]}
+resources["PlayerFunction"]["Properties"]["Code"]["S3Key"] = notification_artifact
+resources["PlayerFunction"]["Properties"]["Environment"]["Variables"]["RANKING_PERIOD_DAYS"] = {
+    "Fn::If": ["HasNotificationArtifact", "7", ref("RankingPeriodDays")]}
+# DEV notification settings are embedded in the function configuration at deployment.
+notification_config = json.dumps(json.loads((root.parent / "config/dev/notifications.json").read_text()), separators=(",", ":"))
+for suffix, route in (("Register", "POST /players/me/devices"), ("Delete", "DELETE /players/me/devices/{deviceId}")):
+    resources["NotificationDevice" + suffix] = {"Type": "AWS::ApiGatewayV2::Route", "Condition": "IsDev",
+        "Properties": {"ApiId": ref("Api"), "RouteKey": route, "AuthorizationType": "JWT", "AuthorizerId": ref("JwtAuthorizer"),
+        "AuthorizationScopes": ["aws.cognito.signin.user.admin"],
+        "Target": {"Fn::Join": ["/", ["integrations", ref("PlayerIntegration")]]}}}
+
+def notification_resource(name, kind, props):
+    resources[name] = {"Type": kind, "Condition": "IsDev", "Properties": props}
+
+notification_resource("NotificationDeliveryTable", "AWS::DynamoDB::Table", {
+    "BillingMode":"PAY_PER_REQUEST","AttributeDefinitions":[{"AttributeName":key,"AttributeType":"S"} for key in ("PK","SK")],
+    "KeySchema":[{"AttributeName":"PK","KeyType":"HASH"},{"AttributeName":"SK","KeyType":"RANGE"}],
+    "TimeToLiveSpecification":{"AttributeName":"notificationExpiresAt","Enabled":True}})
+notification_resource("NotificationDLQ", "AWS::SQS::Queue", {"QueueName": "yalla-dev-notification-push-dlq",
+    "MessageRetentionPeriod": 1209600, "SqsManagedSseEnabled": True})
+notification_resource("NotificationQueue", "AWS::SQS::Queue", {"QueueName": "yalla-dev-notification-push",
+    "MessageRetentionPeriod": 345600, "VisibilityTimeout": 360, "SqsManagedSseEnabled": True,
+    "RedrivePolicy": {"deadLetterTargetArn": arn("NotificationDLQ"), "maxReceiveCount": 5}})
+notification_resource("NotificationDevicePolicy", "AWS::IAM::Policy", {"PolicyName": "NotificationDevices",
+    "Roles": [ref("PlayerRole")], "PolicyDocument": {"Version": "2012-10-17", "Statement": [{
+      "Effect": "Allow", "Action": ["dynamodb:PutItem", "dynamodb:DeleteItem"], "Resource": arn("PlayerTable"),
+      "Condition": {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["PLAYER#*", "SYSTEM#PUSH_TOKEN", "SYSTEM#PUSH_INSTALLATION"]},
+                    "StringEquals": {"dynamodb:EnclosingOperation": "TransactWriteItems"}}
+    }]}})
+for kind, handler, statements, env in [
+    ("Router", "notification-router", [
+      {"Effect":"Allow","Action":["dynamodb:DescribeStream","dynamodb:GetRecords","dynamodb:GetShardIterator","dynamodb:ListStreams"],
+       "Resource":{"Fn::GetAtt":["PlayerTable","StreamArn"]}},
+      {"Effect":"Allow","Action":["sqs:SendMessage"],"Resource":arn("NotificationQueue")},
+      {"Effect":"Allow","Action":["s3:GetObject"],"Resource":"arn:aws:s3:::yalla-result-pools-533266967583/game-config/dev/v1/world-buildings.json"},
+    ], {"PUSH_QUEUE_URL":ref("NotificationQueue"),"GAME_CONFIG_BUCKET":"yalla-result-pools-533266967583",
+        "ENVIRONMENT":"dev"}),
+    ("Worker", "notification-worker", [
+      {"Effect":"Allow","Action":["sqs:ReceiveMessage","sqs:DeleteMessage","sqs:GetQueueAttributes"],"Resource":arn("NotificationQueue")},
+      {"Effect":"Allow","Action":["dynamodb:Query","dynamodb:GetItem","dynamodb:UpdateItem"],"Resource":arn("PlayerTable"),
+       "Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["PLAYER#*"]}}},
+      {"Effect":"Allow","Action":"dynamodb:GetItem","Resource":arn("PlayerTable"),
+       "Condition":{"ForAllValues:StringEquals":{"dynamodb:LeadingKeys":["SYSTEM#PUSH_INSTALLATION"]}}},
+      {"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem","dynamodb:UpdateItem"],"Resource":arn("NotificationDeliveryTable")},
+      {"Effect":"Allow","Action":["ssm:GetParameter"],"Resource":sub("arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/yalla/dev/notifications/apns-private-key")},
+    ], {"APNS_PARAMETER":"/yalla/dev/notifications/apns-private-key","PLAYER_TABLE":ref("PlayerTable"),"PUSH_DELIVERY_TABLE":ref("NotificationDeliveryTable")}),
+]:
+    prefix = "Notification" + kind
+    name = "yalla-dev-notification-" + kind.lower()
+    notification_resource(prefix+"Logs","AWS::Logs::LogGroup",{"LogGroupName":"/aws/lambda/"+name,"RetentionInDays":30})
+    notification_resource(prefix+"Role","AWS::IAM::Role",{
+      "AssumeRolePolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]},
+      "Policies":[{"PolicyName":"Notification"+kind,"PolicyDocument":{"Version":"2012-10-17","Statement":statements+[
+        {"Effect":"Allow","Action":["logs:CreateLogStream","logs:PutLogEvents"],
+         "Resource":sub("${"+prefix+"Logs.Arn}:*")} ]}}]})
+    notification_resource(prefix+"Function","AWS::Lambda::Function",{
+      "FunctionName":name,"Handler":"dist/"+handler+".handler","Runtime":"nodejs24.x","Architectures":["arm64"],
+      "Timeout":60,"MemorySize":256,"Role":arn(prefix+"Role"),"Code":{"S3Bucket":ref("ArtifactBucket"),"S3Key":notification_artifact},
+      "Environment":{"Variables":{"NOTIFICATION_CONFIG":notification_config,**env}}})
+notification_resource("NotificationStreamMapping","AWS::Lambda::EventSourceMapping",{
+    "FunctionName":ref("NotificationRouterFunction"),"EventSourceArn":{"Fn::GetAtt":["PlayerTable","StreamArn"]},
+    "StartingPosition":"LATEST","BatchSize":5,"MaximumRetryAttempts":5,"BisectBatchOnFunctionError":True,
+    "FunctionResponseTypes":["ReportBatchItemFailures"],"DestinationConfig":{"OnFailure":{"Destination":arn("NotificationDLQ")}},
+    "FilterCriteria":{"Filters":[
+      {"Pattern":json.dumps({"dynamodb":{"Keys":{"SK":{"S":[
+         {"prefix":"INCOMING#RECEIPT#"},{"prefix":"INCOMING#WALLET_RAID#"}]}}}},separators=(",",":"))},
+    ]}})
+resources["NotificationRouterRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"].append(
+    {"Effect":"Allow","Action":"sqs:SendMessage","Resource":arn("NotificationDLQ")})
+notification_resource("NotificationQueueMapping","AWS::Lambda::EventSourceMapping",{
+    "FunctionName":ref("NotificationWorkerFunction"),"EventSourceArn":arn("NotificationQueue"),
+    "BatchSize":5,"FunctionResponseTypes":["ReportBatchItemFailures"]})
+
 template = {"AWSTemplateFormatVersion": "2010-09-09", "Parameters": parameters,
-            "Conditions": {"IsDev": {"Fn::Equals": [ref("Environment"), "dev"]}}, "Resources": resources,
+            "Conditions": {"IsDev": {"Fn::Equals": [ref("Environment"), "dev"]},
+                "HasNotificationArtifact": {"Fn::And": [{"Condition":"IsDev"},
+                  {"Fn::Not": [{"Fn::Equals":[ref("NotificationArtifactKey"), ""]}]}]}}, "Resources": resources,
             "Outputs": {key: {"Value": value} for key, value in {
                 "ApiEndpoint": {"Fn::GetAtt": ["Api", "ApiEndpoint"]}, "ApiId": ref("Api"), "PlayerTable": ref("PlayerTable"),
                 "UserPoolId": ref("UserPool"), "UserPoolClientId": ref("UserPoolClient"),

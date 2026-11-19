@@ -1,0 +1,10 @@
+{
+  "remoteEnabled": false,
+  "apns": {"environment":"sandbox","bundleId":"com.mobi8.yallaball","teamId":"","keyId":""},
+  "events": {
+    "RAID_STOLEN":{"activity":true,"telegram":true,"push":true,"pushCooldownSeconds":0,"title":"Your coins were stolen!","body":"{actor} stole {amount} YP from you!"},
+    "ATTACK_HIT":{"activity":true,"telegram":true,"push":true,"pushCooldownSeconds":0,"title":"Your village was attacked!","body":"{actor} damaged your {building}!","fallback":"{actor} attacked your village!"},
+    "ATTACK_BLOCKED":{"activity":true,"telegram":true,"push":true,"pushCooldownSeconds":0,"title":"Your shield saved you!","body":"Your shield blocked {actor}'s attack!"},
+    "ENERGY_FULL":{"activity":false,"telegram":false,"push":"LOCAL","pushCooldownSeconds":0,"title":"Your energy is full!","body":"50/50 Energy! Ready to play?"}
+  }
+}

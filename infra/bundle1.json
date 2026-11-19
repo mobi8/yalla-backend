@@ -21,6 +21,10 @@
       "Default": 1,
       "MinValue": 1,
       "MaxValue": 31
+    },
+    "NotificationArtifactKey": {
+      "Type": "String",
+      "Default": ""
     }
   },
   "Conditions": {
@@ -30,6 +34,25 @@
           "Ref": "Environment"
         },
         "dev"
+      ]
+    },
+    "HasNotificationArtifact": {
+      "Fn::And": [
+        {
+          "Condition": "IsDev"
+        },
+        {
+          "Fn::Not": [
+            {
+              "Fn::Equals": [
+                {
+                  "Ref": "NotificationArtifactKey"
+                },
+                ""
+              ]
+            }
+          ]
+        }
       ]
     }
   },
@@ -791,7 +814,15 @@
             "Ref": "ArtifactBucket"
           },
           "S3Key": {
-            "Ref": "ArtifactKey"
+            "Fn::If": [
+              "HasNotificationArtifact",
+              {
+                "Ref": "NotificationArtifactKey"
+              },
+              {
+                "Ref": "ArtifactKey"
+              }
+            ]
           }
         },
         "Environment": {
@@ -809,7 +840,13 @@
               "Ref": "Environment"
             },
             "RANKING_PERIOD_DAYS": {
-              "Ref": "RankingPeriodDays"
+              "Fn::If": [
+                "HasNotificationArtifact",
+                "7",
+                {
+                  "Ref": "RankingPeriodDays"
+                }
+              ]
             },
             "RESULT_POLICY": "PERMISSIVE",
             "GAME_CONFIG_BUCKET": "yalla-result-pools-533266967583",
@@ -1779,6 +1816,526 @@
         },
         "AuthorizationScopes": [
           "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "NotificationDeviceRegister": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /players/me/devices",
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ],
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "NotificationDeviceDelete": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "DELETE /players/me/devices/{deviceId}",
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ],
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "NotificationDeliveryTable": {
+      "Type": "AWS::DynamoDB::Table",
+      "Condition": "IsDev",
+      "Properties": {
+        "BillingMode": "PAY_PER_REQUEST",
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "PK",
+            "AttributeType": "S"
+          },
+          {
+            "AttributeName": "SK",
+            "AttributeType": "S"
+          }
+        ],
+        "KeySchema": [
+          {
+            "AttributeName": "PK",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "SK",
+            "KeyType": "RANGE"
+          }
+        ],
+        "TimeToLiveSpecification": {
+          "AttributeName": "notificationExpiresAt",
+          "Enabled": true
+        }
+      }
+    },
+    "NotificationDLQ": {
+      "Type": "AWS::SQS::Queue",
+      "Condition": "IsDev",
+      "Properties": {
+        "QueueName": "yalla-dev-notification-push-dlq",
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true
+      }
+    },
+    "NotificationQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Condition": "IsDev",
+      "Properties": {
+        "QueueName": "yalla-dev-notification-push",
+        "MessageRetentionPeriod": 345600,
+        "VisibilityTimeout": 360,
+        "SqsManagedSseEnabled": true,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "NotificationDLQ",
+              "Arn"
+            ]
+          },
+          "maxReceiveCount": 5
+        }
+      }
+    },
+    "NotificationDevicePolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Condition": "IsDev",
+      "Properties": {
+        "PolicyName": "NotificationDevices",
+        "Roles": [
+          {
+            "Ref": "PlayerRole"
+          }
+        ],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:PutItem",
+                "dynamodb:DeleteItem"
+              ],
+              "Resource": {
+                "Fn::GetAtt": [
+                  "PlayerTable",
+                  "Arn"
+                ]
+              },
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "PLAYER#*",
+                    "SYSTEM#PUSH_TOKEN",
+                    "SYSTEM#PUSH_INSTALLATION"
+                  ]
+                },
+                "StringEquals": {
+                  "dynamodb:EnclosingOperation": "TransactWriteItems"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "NotificationRouterLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Condition": "IsDev",
+      "Properties": {
+        "LogGroupName": "/aws/lambda/yalla-dev-notification-router",
+        "RetentionInDays": 30
+      }
+    },
+    "NotificationRouterRole": {
+      "Type": "AWS::IAM::Role",
+      "Condition": "IsDev",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "NotificationRouter",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:DescribeStream",
+                    "dynamodb:GetRecords",
+                    "dynamodb:GetShardIterator",
+                    "dynamodb:ListStreams"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "PlayerTable",
+                      "StreamArn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:SendMessage"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "NotificationQueue",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": "arn:aws:s3:::yalla-result-pools-533266967583/game-config/dev/v1/world-buildings.json"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${NotificationRouterLogs.Arn}:*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "sqs:SendMessage",
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "NotificationDLQ",
+                      "Arn"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "NotificationRouterFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Condition": "IsDev",
+      "Properties": {
+        "FunctionName": "yalla-dev-notification-router",
+        "Handler": "dist/notification-router.handler",
+        "Runtime": "nodejs24.x",
+        "Architectures": [
+          "arm64"
+        ],
+        "Timeout": 60,
+        "MemorySize": 256,
+        "Role": {
+          "Fn::GetAtt": [
+            "NotificationRouterRole",
+            "Arn"
+          ]
+        },
+        "Code": {
+          "S3Bucket": {
+            "Ref": "ArtifactBucket"
+          },
+          "S3Key": {
+            "Fn::If": [
+              "HasNotificationArtifact",
+              {
+                "Ref": "NotificationArtifactKey"
+              },
+              {
+                "Ref": "ArtifactKey"
+              }
+            ]
+          }
+        },
+        "Environment": {
+          "Variables": {
+            "NOTIFICATION_CONFIG": "{\"remoteEnabled\":false,\"apns\":{\"environment\":\"sandbox\",\"bundleId\":\"com.mobi8.yallaball\",\"teamId\":\"\",\"keyId\":\"\"},\"events\":{\"RAID_STOLEN\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your coins were stolen!\",\"body\":\"{actor} stole {amount} YP from you!\"},\"ATTACK_HIT\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your village was attacked!\",\"body\":\"{actor} damaged your {building}!\",\"fallback\":\"{actor} attacked your village!\"},\"ATTACK_BLOCKED\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your shield saved you!\",\"body\":\"Your shield blocked {actor}'s attack!\"},\"ENERGY_FULL\":{\"activity\":false,\"telegram\":false,\"push\":\"LOCAL\",\"pushCooldownSeconds\":0,\"title\":\"Your energy is full!\",\"body\":\"50/50 Energy! Ready to play?\"}}}",
+            "PUSH_QUEUE_URL": {
+              "Ref": "NotificationQueue"
+            },
+            "GAME_CONFIG_BUCKET": "yalla-result-pools-533266967583",
+            "ENVIRONMENT": "dev"
+          }
+        }
+      }
+    },
+    "NotificationWorkerLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Condition": "IsDev",
+      "Properties": {
+        "LogGroupName": "/aws/lambda/yalla-dev-notification-worker",
+        "RetentionInDays": 30
+      }
+    },
+    "NotificationWorkerRole": {
+      "Type": "AWS::IAM::Role",
+      "Condition": "IsDev",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "NotificationWorker",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:GetQueueAttributes"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "NotificationQueue",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:Query",
+                    "dynamodb:GetItem",
+                    "dynamodb:UpdateItem"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "PlayerTable",
+                      "Arn"
+                    ]
+                  },
+                  "Condition": {
+                    "ForAllValues:StringLike": {
+                      "dynamodb:LeadingKeys": [
+                        "PLAYER#*"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "dynamodb:GetItem",
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "PlayerTable",
+                      "Arn"
+                    ]
+                  },
+                  "Condition": {
+                    "ForAllValues:StringEquals": {
+                      "dynamodb:LeadingKeys": [
+                        "SYSTEM#PUSH_INSTALLATION"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:GetItem",
+                    "dynamodb:PutItem",
+                    "dynamodb:UpdateItem"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "NotificationDeliveryTable",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ssm:GetParameter"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/yalla/dev/notifications/apns-private-key"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${NotificationWorkerLogs.Arn}:*"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "NotificationWorkerFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Condition": "IsDev",
+      "Properties": {
+        "FunctionName": "yalla-dev-notification-worker",
+        "Handler": "dist/notification-worker.handler",
+        "Runtime": "nodejs24.x",
+        "Architectures": [
+          "arm64"
+        ],
+        "Timeout": 60,
+        "MemorySize": 256,
+        "Role": {
+          "Fn::GetAtt": [
+            "NotificationWorkerRole",
+            "Arn"
+          ]
+        },
+        "Code": {
+          "S3Bucket": {
+            "Ref": "ArtifactBucket"
+          },
+          "S3Key": {
+            "Fn::If": [
+              "HasNotificationArtifact",
+              {
+                "Ref": "NotificationArtifactKey"
+              },
+              {
+                "Ref": "ArtifactKey"
+              }
+            ]
+          }
+        },
+        "Environment": {
+          "Variables": {
+            "NOTIFICATION_CONFIG": "{\"remoteEnabled\":false,\"apns\":{\"environment\":\"sandbox\",\"bundleId\":\"com.mobi8.yallaball\",\"teamId\":\"\",\"keyId\":\"\"},\"events\":{\"RAID_STOLEN\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your coins were stolen!\",\"body\":\"{actor} stole {amount} YP from you!\"},\"ATTACK_HIT\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your village was attacked!\",\"body\":\"{actor} damaged your {building}!\",\"fallback\":\"{actor} attacked your village!\"},\"ATTACK_BLOCKED\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your shield saved you!\",\"body\":\"Your shield blocked {actor}'s attack!\"},\"ENERGY_FULL\":{\"activity\":false,\"telegram\":false,\"push\":\"LOCAL\",\"pushCooldownSeconds\":0,\"title\":\"Your energy is full!\",\"body\":\"50/50 Energy! Ready to play?\"}}}",
+            "APNS_PARAMETER": "/yalla/dev/notifications/apns-private-key",
+            "PLAYER_TABLE": {
+              "Ref": "PlayerTable"
+            },
+            "PUSH_DELIVERY_TABLE": {
+              "Ref": "NotificationDeliveryTable"
+            }
+          }
+        }
+      }
+    },
+    "NotificationStreamMapping": {
+      "Type": "AWS::Lambda::EventSourceMapping",
+      "Condition": "IsDev",
+      "Properties": {
+        "FunctionName": {
+          "Ref": "NotificationRouterFunction"
+        },
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "PlayerTable",
+            "StreamArn"
+          ]
+        },
+        "StartingPosition": "LATEST",
+        "BatchSize": 5,
+        "MaximumRetryAttempts": 5,
+        "BisectBatchOnFunctionError": true,
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures"
+        ],
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": {
+              "Fn::GetAtt": [
+                "NotificationDLQ",
+                "Arn"
+              ]
+            }
+          }
+        },
+        "FilterCriteria": {
+          "Filters": [
+            {
+              "Pattern": "{\"dynamodb\":{\"Keys\":{\"SK\":{\"S\":[{\"prefix\":\"INCOMING#RECEIPT#\"},{\"prefix\":\"INCOMING#WALLET_RAID#\"}]}}}}"
+            }
+          ]
+        }
+      }
+    },
+    "NotificationQueueMapping": {
+      "Type": "AWS::Lambda::EventSourceMapping",
+      "Condition": "IsDev",
+      "Properties": {
+        "FunctionName": {
+          "Ref": "NotificationWorkerFunction"
+        },
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "NotificationQueue",
+            "Arn"
+          ]
+        },
+        "BatchSize": 5,
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures"
         ]
       }
     }

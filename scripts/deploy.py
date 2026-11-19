@@ -15,7 +15,10 @@ parser.add_argument('--environment', required=True, choices=['dev', 'staging', '
 parser.add_argument('--profile', required=True)
 parser.add_argument('--region', default='ap-south-1')
 parser.add_argument('--isolated-player', type=uuid.UUID, help='Limit DEV bot targeting to a test guest')
+parser.add_argument('--notification-rollout', action='store_true', help='Review DEV change set before executing; preserve live bot config')
 args = parser.parse_args()
+if args.notification_rollout and (args.environment != 'dev' or args.isolated_player):
+    parser.error('--notification-rollout requires DEV and cannot alter the bot allowlist')
 if args.isolated_player and args.environment != 'dev':
     parser.error('--isolated-player is DEV-only')
 if args.environment == 'dev' and args.profile != 'yalla-dev':
@@ -30,7 +33,6 @@ def aws(*cmd, capture=False):
 
 run('npm', 'run', 'typecheck')
 run('npm', 'test')
-run('npm', 'run', 'build')
 run('python3', 'infra/generate.py')
 identity = json.loads(aws('sts', 'get-caller-identity', capture=True))
 print(f"Deploying {args.environment} in account {identity['Account']} / {args.region}", flush=True)
@@ -47,8 +49,8 @@ if args.environment == 'dev':
     unit = 'minute' if minutes == 1 else 'minutes'
     if expected_rate != f'rate({minutes} {unit})':
         raise RuntimeError('DEV Lambda policy and generated Rule rate differ')
-    run('node', '--input-type=module', '-e',
-        'import { botsSchema } from "./dist/bots-config.js"; botsSchema.parse(JSON.parse(process.argv[1]));',
+    run('node', '--import', 'tsx', '--input-type=module', '-e',
+        'import { botsSchema } from "./src/bots-config.ts"; botsSchema.parse(JSON.parse(process.argv[1]));',
         json.dumps(dev_policy))
 
 storage_stack = f'yalla-{args.environment}-artifacts'
@@ -57,7 +59,8 @@ outputs = json.loads(aws('cloudformation', 'describe-stacks', '--stack-name', st
 bucket = next(o['OutputValue'] for o in outputs if o['OutputKey'] == 'ArtifactBucket')
 with tempfile.TemporaryDirectory(prefix='yalla-package-') as temp:
     stage = Path(temp) / 'package'
-    shutil.copytree(root / 'dist', stage / 'dist')
+    stage.mkdir()
+    run('npm', 'run', 'build', '--', '--outDir', str(stage / 'dist'))
     shutil.copy2(root / 'package.json', stage / 'package.json')
     lock = json.loads((root / 'package-lock.json').read_text())
     for path, metadata in lock['packages'].items():
@@ -76,7 +79,7 @@ with tempfile.TemporaryDirectory(prefix='yalla-package-') as temp:
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     key = f'bundle1/{digest}.zip'
     aws('s3', 'cp', str(archive), f's3://{bucket}/{key}', '--only-show-errors')
-    if dev_policy is not None:
+    if dev_policy is not None and not args.notification_rollout:
         if args.isolated_player:
             rule = json.loads(aws('cloudformation', 'describe-stack-resource', '--stack-name',
                 'yalla-dev-bundle1', '--logical-resource-id', 'IncomingRule',
@@ -87,9 +90,33 @@ with tempfile.TemporaryDirectory(prefix='yalla-package-') as temp:
         aws('s3api', 'put-object', '--bucket', 'yalla-result-pools-533266967583',
             '--key', 'game-config/dev/v1/bots.json', '--body', str(config_path),
             '--content-type', 'application/json', capture=True)
-    aws('cloudformation', 'deploy', '--stack-name', f'yalla-{args.environment}-bundle1', '--template-file', 'infra/bundle1.json',
-        '--capabilities', 'CAPABILITY_IAM', '--parameter-overrides', f'Environment={args.environment}', f'ArtifactBucket={bucket}', f'ArtifactKey={key}',
-        '--no-fail-on-empty-changeset')
+    if args.notification_rollout:
+        stack = 'yalla-dev-bundle1'
+        change_set = 'notification-' + uuid.uuid4().hex[:16]
+        template_key = f'bundle1/{change_set}.json'
+        aws('s3','cp','infra/bundle1.json',f's3://{bucket}/{template_key}','--only-show-errors')
+        aws('cloudformation','create-change-set','--stack-name',stack,'--change-set-name',change_set,
+            '--change-set-type','UPDATE','--capabilities','CAPABILITY_IAM',
+            '--template-url',f'https://{bucket}.s3.{args.region}.amazonaws.com/{template_key}',
+            '--parameters','ParameterKey=Environment,ParameterValue=dev',
+            'ParameterKey=ArtifactBucket,UsePreviousValue=true','ParameterKey=ArtifactKey,UsePreviousValue=true',
+            f'ParameterKey=NotificationArtifactKey,ParameterValue={key}','ParameterKey=RankingPeriodDays,UsePreviousValue=true',capture=True)
+        aws('cloudformation','wait','change-set-create-complete','--stack-name',stack,'--change-set-name',change_set)
+        review=json.loads(aws('cloudformation','describe-change-set','--stack-name',stack,'--change-set-name',change_set,capture=True))
+        print('DEV change set: '+review['ChangeSetName'],flush=True)
+        for item in review['Changes']:
+            change=item['ResourceChange']
+            print(change['Action'],change['LogicalResourceId'],change.get('Replacement','-'),flush=True)
+            protected = {'IncomingPermission', 'IncomingRule', 'IncomingFunction', 'IncomingRole'}
+            if change['LogicalResourceId'] in protected or change['Action'] == 'Remove' or change.get('Replacement') not in (None,'False'):
+                raise RuntimeError('Change set would remove or replace an existing resource; stopped before execution')
+        aws('cloudformation','execute-change-set','--stack-name',stack,'--change-set-name',change_set)
+        aws('cloudformation','wait','stack-update-complete','--stack-name',stack)
+    else:
+        aws('cloudformation', 'deploy', '--stack-name', f'yalla-{args.environment}-bundle1', '--template-file', 'infra/bundle1.json',
+            '--capabilities', 'CAPABILITY_IAM', '--parameter-overrides', f'Environment={args.environment}', f'ArtifactBucket={bucket}', f'ArtifactKey={key}',
+            *( [f'NotificationArtifactKey={key}'] if dev_policy is not None else [] ),
+            '--no-fail-on-empty-changeset')
     if dev_policy is not None:
         rule = json.loads(aws('cloudformation', 'describe-stack-resource', '--stack-name',
             'yalla-dev-bundle1', '--logical-resource-id', 'IncomingRule',
@@ -105,6 +132,8 @@ with tempfile.TemporaryDirectory(prefix='yalla-package-') as temp:
         if live['ScheduleExpression'] != expected_rate or rules != [rule] or schedules:
             raise RuntimeError('DEV trigger differs from the generated policy or has duplicate targets')
         if live['State'] != 'ENABLED':
+            if args.notification_rollout:
+                raise RuntimeError('Existing bot rule is unexpectedly disabled')
             aws('events', 'enable-rule', '--name', rule)
             live = json.loads(aws('events', 'describe-rule', '--name', rule, capture=True))
             if live['State'] != 'ENABLED':
@@ -113,9 +142,9 @@ with tempfile.TemporaryDirectory(prefix='yalla-package-') as temp:
         aws('s3api', 'get-object', '--bucket', 'yalla-result-pools-533266967583', '--key',
             'game-config/dev/v1/bots.json', str(deployed), capture=True)
         actual_sha = json.loads(aws('lambda', 'get-function-configuration', '--function-name',
-            'yalla-dev-incoming-raid', '--query', 'CodeSha256', capture=True))
+            'yalla-dev-player' if args.notification_rollout else 'yalla-dev-incoming-raid', '--query', 'CodeSha256', capture=True))
         expected_sha = base64.b64encode(bytes.fromhex(digest)).decode()
-        if json.loads(deployed.read_text()) != dev_policy or actual_sha != expected_sha:
+        if (not args.notification_rollout and json.loads(deployed.read_text()) != dev_policy) or actual_sha != expected_sha:
             raise RuntimeError('DEV runtime config or Lambda package differs from deployment input')
         print(f"Verified {live['Arn']} at {expected_rate}", flush=True)
 print(aws('cloudformation', 'describe-stacks', '--stack-name', f'yalla-{args.environment}-bundle1', '--query', 'Stacks[0].Outputs', capture=True))

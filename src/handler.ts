@@ -1,3 +1,4 @@
+import { NotificationDevices, deviceInput } from './notification-devices.js';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { PlayerActivity } from './player-activity.js';
@@ -34,7 +35,7 @@ function body(event: HttpEvent): unknown {
   try { return JSON.parse(event.body ? (event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body) : '{}'); }
   catch { throw new ApiError(400, 'INVALID_JSON'); }
 }
-export function createHandler(service: PlayerService, authenticate: Authenticate = cognitoContext, identity?: GuestIdentity, drops?: DropService, bonuses?: BonusService, worlds?: WorldService, recordActivity?: (principal: Principal) => Promise<void>, journey?: JourneyReadService) {
+export function createHandler(service: PlayerService, authenticate: Authenticate = cognitoContext, identity?: GuestIdentity, drops?: DropService, bonuses?: BonusService, worlds?: WorldService, recordActivity?: (principal: Principal) => Promise<void>, journey?: JourneyReadService, devices?: NotificationDevices) {
   return async (event: HttpEvent) => {
     const response = (statusCode: number, data: unknown) => ({ statusCode,
       headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }, body: JSON.stringify(data) });
@@ -59,6 +60,18 @@ export function createHandler(service: PlayerService, authenticate: Authenticate
         if (route.endsWith('/refresh')) return response(200, { tokens: await identity.refresh(input.data.refreshToken) });
         await identity.revoke(input.data.refreshToken);
         return response(200, { revoked: true });
+      }
+      if (route === 'POST /players/me/devices' || route.startsWith('DELETE /players/me/devices/')) {
+        const principal = await authenticate(event);
+        if (!devices) throw new ApiError(404,'DEVICE_API_UNAVAILABLE');
+        if (route.startsWith('POST ')) {
+          const input = deviceInput.safeParse(body(event));
+          if (!input.success) throw new ApiError(400,'INVALID_DEVICE');
+          return response(200,await devices.register(principal,input.data));
+        }
+        const id = z.uuid().safeParse(event.rawPath.slice('/players/me/devices/'.length));
+        if (!id.success) throw new ApiError(400,'INVALID_DEVICE');
+        return response(200,await devices.remove(principal,id.data));
       }
       if (route === 'GET /ranking/distance' || route === 'GET /players/me/activity') {
         const principal = await activePrincipal();
@@ -186,7 +199,8 @@ export async function handler(event: HttpEvent | z.infer<typeof opsNicknameReque
       const playerId = await players.find(principal);
       if (!playerId) throw new ApiError(404, 'PLAYER_NOT_FOUND');
       await activity.record(playerId);
-    }, createJourneyReadService(process.env.PLAYER_TABLE, players));
+    }, createJourneyReadService(process.env.PLAYER_TABLE, players), process.env.ENVIRONMENT === 'dev'
+      ? new NotificationDevices(DynamoDBDocumentClient.from(new DynamoDBClient({})),process.env.PLAYER_TABLE,players) : undefined);
   }
   return configured(event);
 }
