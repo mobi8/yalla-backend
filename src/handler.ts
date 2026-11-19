@@ -148,8 +148,17 @@ export function createHandler(service: PlayerService, authenticate: Authenticate
   };
 }
 let configured: ReturnType<typeof createHandler> | undefined;
-export async function handler(event: HttpEvent) {
+const opsNicknameRequest = z.strictObject({ action: z.literal('ensurePlayerNickname'), playerId: z.uuid() });
+
+export async function handler(event: HttpEvent | z.infer<typeof opsNicknameRequest>) {
   if (!process.env.PLAYER_TABLE) return { statusCode: 503, body: JSON.stringify({ error: 'PLAYER_TABLE_NOT_CONFIGURED' }) };
+  // Direct IAM-authorized invocation only. API Gateway always supplies requestContext.
+  if (!('requestContext' in event)) {
+    const input = opsNicknameRequest.parse(event);
+    const profile = await createDynamoRepository(process.env.PLAYER_TABLE).ensureProfileNickname(input.playerId);
+    if (!profile) throw new Error('Profile not found');
+    return { nickname: profile.nickname };
+  }
   if (!process.env.USER_POOL_ID || !process.env.USER_POOL_CLIENT_ID || !process.env.COGNITO_ISSUER)
     return { statusCode: 503, body: JSON.stringify({ error: 'AUTH_NOT_CONFIGURED' }) };
   if (!configured) {

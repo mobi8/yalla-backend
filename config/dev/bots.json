@@ -10,7 +10,7 @@
   },
   "shield": {
     "maximum": 3,
-    "regenHours": 3
+    "regenHours": 6
   },
   "bots": [
     {
@@ -74,5 +74,20 @@
       "defenseEnabled": true
     }
   ],
-  "devFastMode": true
+  "offlinePolicy": {
+    "scheduleMinutes": 15,
+    "offlineMinMinutes": 5,
+    "offlineMaxHours": 24,
+    "perPlayerCooldownMinutes": 0,
+    "dailyLimit": null,
+    "attackRaidWeights": {
+      "ATTACK": 1,
+      "RAID": 1
+    },
+    "walletRaid": {
+      "enabled": true,
+      "protectedBalanceBps": 5000,
+      "bagWeightsBps": [2000, 2000, 1000, 0, 0]
+    }
+  }
 }

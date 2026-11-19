@@ -4,10 +4,12 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { collectionSchema } from './drop-economy.js';
 import { BotsConfigs, DEV_RAID_PLAYER, type BotsConfig, type BotsSource } from './bots-config.js';
-import { currentVillageDamage, profileSchema, progressSchema } from './model.js';
+import { currentVillageDamage, profileSchema } from './model.js';
 import { buildingIds } from './world-config.js';
 import { regenerateRaidBots } from './raid-bots.js';
-import { playerKey } from './repository.js';
+import { decodeProgress, decodeWallet, encodeProgress, encodeWallet, playerKey, playerNumberOptions } from './repository.js';
+
+import { startWalletRaid, walletRaidDebit, WALLET_RAID_PREFIX } from './incoming-wallet-raid.js';
 
 const MINUTE=60000, DAY=86400000, SHARDS=16;
 const digest=(s:string)=>createHash('sha256').update(s).digest();
@@ -27,6 +29,21 @@ export function newIncomingSchedule(player:string, now:number, rate=2.5) {
   return {schemaVersion:1,version:1,updatedAt:new Date(now).toISOString(),playerId:player,
     duePartition:shard(player),dueAt:new Date(nextAttackAt(player,now,rate)).toISOString(),sequence:1,day:'',dayCount:0};
 }
+function offlineWindow(now: number, policy?: BotsConfig['offlinePolicy']) {
+  const maxAge = policy ? policy.offlineMaxHours * 60 * MINUTE : INACTIVE_AFTER_MS;
+  const minAge = policy ? policy.offlineMinMinutes * MINUTE : OFFLINE_AFTER_MS;
+  return {
+    oldest: new Date(now - maxAge).toISOString(),
+    latest: new Date(now - minAge - 1).toISOString(),
+  };
+}
+
+function scheduledSlot(at: number, scheduleMinutes: number) {
+  return Math.floor(at / (scheduleMinutes * MINUTE)) * scheduleMinutes;
+}
+
+type IncomingAction = 'ATTACK' | 'RAID';
+type IncomingWrite = {sk: string; value: Record<string, any>; expectedVersion?: number};
 type RaidGuard = { oldest: string; latest: string; slot?: number };
 
 export interface IncomingStore {
@@ -34,23 +51,30 @@ export interface IncomingStore {
   slotUsed?(slot: number): Promise<boolean>;
   due(now:string, shard:string):Promise<{playerId:string}[]>;
   get(player:string, sk:string):Promise<Record<string,any>|undefined>;
-  commit(player:string,writes:{sk:string;value:Record<string,any>;expectedVersion?:number}[],guard?: RaidGuard):Promise<void>;
+  commit(player:string,writes:IncomingWrite[],guard?: RaidGuard):Promise<void>;
 }
 export class IncomingRaidService {
   constructor(private store:IncomingStore,private configs:BotsSource,private clock=Date.now) {}
-  async run() {
+  async run(scheduledAt?: number, eventId?: string) {
     const config=await this.configs.load();
-    if(!config.incomingRaid.enabled || config.incomingRaid.averageAttacksPerDay===0) return;
+    if (!config.incomingRaid.enabled) return;
     if (config.incomingRaid.targetOffline) {
       if (!this.store.offline || !config.bots.some(bot => bot.attackEnabled)) return;
       const now = this.clock();
-      if (config.devFastMode) {
-        await this.rechargeDevBots(DEV_RAID_PLAYER, config, now);
-        if (await this.store.slotUsed?.(Math.floor(now / MINUTE))) return;
-      }
-      for await (const player of this.store.offline(new Date(now - INACTIVE_AFTER_MS).toISOString(),
-        new Date(now - OFFLINE_AFTER_MS - 1).toISOString())) {
-        if (await this.execute(player, config)) return;
+      const policy = config.offlinePolicy;
+      const slot = policy ? scheduledSlot(scheduledAt ?? now, policy.scheduleMinutes) : undefined;
+      if (slot !== undefined && await this.store.slotUsed?.(slot)) return;
+      const weights = policy?.attackRaidWeights ?? { ATTACK: 1, RAID: 0 };
+      const total = weights.ATTACK + weights.RAID;
+      if (!total) return;
+      // EventBridge supplies the same random event ID when retrying a scheduled invocation.
+      const action = fraction(`bot-slot:${eventId ?? slot ?? now}`) * total < weights.ATTACK ? 'ATTACK' : 'RAID';
+      if (policy) console.info(JSON.stringify({event:'INCOMING_ACTION_SELECTED', slot, action, weights}));
+      if (policy || config.devFastMode) await this.rechargeDevBots(DEV_RAID_PLAYER, config, now);
+      if (config.devFastMode && await this.store.slotUsed?.(Math.floor(now / MINUTE))) return;
+      const {oldest, latest} = offlineWindow(now, policy);
+      for await (const player of this.store.offline(oldest, latest)) {
+        if (await this.execute(player, config, slot, action)) return;
       }
       return;
     }
@@ -81,38 +105,78 @@ export class IncomingRaidService {
     }
   }
 
-  async execute(player:string,config?:BotsConfig) {
+  async execute(player:string,config?:BotsConfig, slot?: number, action: IncomingAction = 'ATTACK') {
     const c=config??await this.configs.load();
-    if(!c.incomingRaid.enabled || c.incomingRaid.averageAttacksPerDay===0 ||
+    if(!c.incomingRaid.enabled || (action === 'ATTACK' && (c.offlinePolicy?.attackRaidWeights?.ATTACK ?? 1) === 0) ||
         (c.incomingRaid.allowedPlayerIds.length && !c.incomingRaid.allowedPlayerIds.includes(player)) ||
         (c.devFastMode && !c.incomingRaid.targetOffline && player !== DEV_RAID_PLAYER) || !profileSchema.shape.playerId.safeParse(player).success) return;
     const active = c.bots.filter(bot => bot.attackEnabled);
     if (!active.length) return;
     if ((await this.store.get(player, 'PROFILE'))?.playerId !== player) return;
+    const raidConfig = c.offlinePolicy?.walletRaid;
+    if (action === 'RAID' && (!raidConfig?.enabled || !raidConfig.bagWeightsBps)) return;
+    let raidPlan: ReturnType<typeof startWalletRaid> | undefined;
     for(let attempt=0;attempt<5;attempt++) {
       try {
         const now=this.clock(), iso=new Date(now).toISOString();
         const offline = c.incomingRaid.targetOffline;
+        const policy = c.offlinePolicy;
+        const currentSlot = slot ?? (policy ? scheduledSlot(now, policy.scheduleMinutes) : undefined);
         const guard = offline ? {
-          oldest: new Date(now - INACTIVE_AFTER_MS).toISOString(),
-          latest: new Date(now - OFFLINE_AFTER_MS - 1).toISOString(),
-          slot: c.devFastMode ? Math.floor(now / MINUTE) : undefined,
+          ...offlineWindow(now, policy),
+          slot: currentSlot ?? (c.devFastMode ? Math.floor(now / MINUTE) : undefined),
         } : undefined;
-        if (offline && !isRaidCandidate((await this.store.get(player, ACTIVITY_KEY))?.lastActiveAt, now)) return;
+        if (guard) {
+          const lastActiveAt = (await this.store.get(player, ACTIVITY_KEY))?.lastActiveAt;
+          if (policy
+            ? typeof lastActiveAt !== 'string' || lastActiveAt < guard.oldest || lastActiveAt > guard.latest
+            : !isRaidCandidate(lastActiveAt, now)) return;
+        }
         if (c.devFastMode && !offline) await this.rechargeDevBots(player, c, now);
         const storedSchedule = await this.store.get(player, 'INCOMING#SCHEDULE');
         if (!storedSchedule && !offline) return;
         const schedule = storedSchedule ?? {...newIncomingSchedule(player, now), version: 0, dueAt: iso};
-        if (Date.parse(schedule.dueAt)>now) return;
+        if (policy) {
+          if (policy.perPlayerCooldownMinutes > 0 && schedule.lastSettledAt &&
+              now - Date.parse(schedule.lastSettledAt) < policy.perPlayerCooldownMinutes * MINUTE) return;
+        } else if (Date.parse(schedule.dueAt)>now) return;
         const day=iso.slice(0,10), count=schedule.day===day?schedule.dayCount:0;
-        const nextAt = c.devFastMode ? (Math.floor(now / MINUTE) + 1) * MINUTE :
+        const nextAt = policy ? now : c.devFastMode ? (Math.floor(now / MINUTE) + 1) * MINUTE :
           nextAttackAt(player, Math.max(now, Date.parse(schedule.dueAt)), c.incomingRaid.averageAttacksPerDay);
         const next={...schedule,version:schedule.version+1,updatedAt:iso,dueAt:new Date(nextAt).toISOString(),
           sequence:schedule.sequence+1,day,dayCount:count};
-        const writes:{sk:string;value:Record<string,any>;expectedVersion?:number}[]=[
+        const writes:IncomingWrite[]=[
           {sk:'INCOMING#SCHEDULE',value:next,expectedVersion:storedSchedule?.version}
         ];
-        if(c.devFastMode || count<c.incomingRaid.maximumAttacksPerDay) {
+        if(policy ? policy.dailyLimit === null || count < policy.dailyLimit : c.devFastMode || count<c.incomingRaid.maximumAttacksPerDay) {
+          if (action === 'RAID') {
+            const stored = await this.store.get(player, 'WALLET');
+            if (!stored) return;
+            const wallet = decodeWallet(stored);
+            const {protectedBalanceBps, bagWeightsBps} = raidConfig!;
+            raidPlan ??= startWalletRaid(wallet.yallaPoint, bagWeightsBps!);
+            const stolenYP = walletRaidDebit(raidPlan.selectedYP, wallet.yallaPoint, protectedBalanceBps);
+            const balanceAfter = wallet.yallaPoint - stolenYP;
+            const sequence = String(schedule.sequence);
+            const eventId = `RAID:${player}:${sequence}`;
+            const bot = active[digest(`${player}:${sequence}:bot`).readUInt32BE(0) % active.length]!;
+            next.dayCount = count + 1;
+            Object.assign(next, {lastSettledAt: iso});
+            writes.push(
+              {sk:'WALLET', expectedVersion:wallet.version, value:{...wallet,
+                yallaPoint:balanceAfter, version:wallet.version+1, updatedAt:iso}},
+              {sk:`${WALLET_RAID_PREFIX}${sequence.padStart(16, '0')}`, value:{
+                schemaVersion:1, version:1, updatedAt:iso, eventId, eventType:'RAID', actorType:'BOT',
+                actorId:bot.id, targetType:'PLAYER', targetId:player, targetPlayerId:player, occurredAt:iso,
+                result:stolenYP ? 'Success' : 'Miss', outcome:stolenYP ? 'HIT' : 'MISS', shieldConsumed:false,
+                stolenYP, burnedYP:stolenYP, ...raidPlan, protectedBalanceBps, bagWeightsBps,
+                balanceBefore:wallet.yallaPoint, balanceAfter,
+              }},
+            );
+            await this.store.commit(player, writes, guard);
+            console.info(JSON.stringify({event:'INCOMING_WALLET_RAID_SETTLED',slot:currentSlot,outcome:stolenYP?'HIT':'MISS'}));
+            return true;
+          }
           const previous=await this.store.get(player,'COLLECTION');
           if (!previous) return;
           const collection=collectionSchema.parse(previous);
@@ -123,23 +187,43 @@ export class IncomingRaidService {
           if (!blocked) {
             const stored=await this.store.get(player,'PROGRESS');
             if (!stored) return;
-            const progress=progressSchema.parse(stored);
+            const progress=decodeProgress(stored);
             const damage=currentVillageDamage(progress);
-            const healthy=buildingIds.filter(id=>!damage[id]);
+            const healthy=buildingIds.filter((id, index) => !damage[id] &&
+              (!policy || (!progress.worldRunComplete && progress.facilityLevels[index]! > 1)));
             if (healthy.length) {
               const buildingId=healthy[digest(`${player}:${attackId}:building`).readUInt32BE(0)%healthy.length]!;
-              hit={worldId:progress.worldId,worldRunId:progress.worldRunId,village:progress.village,buildingId};
-              writes.push({sk:'PROGRESS',expectedVersion:progress.version,value:{...progress,version:progress.version+1,updatedAt:iso,
-                villageDamage:{worldRunId:progress.worldRunId,village:progress.village,buildings:{...damage,[buildingId]:attackId}}}});
+              const index = buildingIds.indexOf(buildingId);
+              const facilityLevels = [...progress.facilityLevels];
+              const levelBefore = facilityLevels[index]!;
+              if (policy) facilityLevels[index] = levelBefore - 1;
+              hit={worldId:progress.worldId,worldRunId:progress.worldRunId,village:progress.village,buildingId,
+                ...(policy ? {levelBefore, levelAfter: facilityLevels[index]} : {})};
+              const levelsBefore = Object.keys(damage).length ? progress.villageDamage?.levelsBefore : undefined;
+              writes.push({sk:'PROGRESS',expectedVersion:progress.version,value:{...progress,facilityLevels,
+                version:progress.version+1,updatedAt:iso,
+                villageDamage:{worldRunId:progress.worldRunId,village:progress.village,buildings:{...damage,[buildingId]:attackId},
+                  ...(policy ? {levelsBefore:{...levelsBefore,[buildingId]:levelBefore}} : {})}}});
+              if (policy) {
+                const sk = `WORLD#${progress.worldId}`;
+                const world = await this.store.get(player, sk);
+                if (world?.status === 'COMPLETE') return;
+                if (world) writes.push({sk, expectedVersion:world.version,
+                  value:{...world, levels:facilityLevels, version:world.version+1, updatedAt:iso}});
+              }
             }
           }
           if (blocked || hit) {
             next.dayCount=count+1;
+            if (policy) Object.assign(next, {lastSettledAt: iso});
             // Pin the shield check against concurrent Collection changes even on an unblocked hit.
             writes.push({sk:'COLLECTION',value:{...collection,shieldCount:collection.shieldCount-Number(blocked),
               version:collection.version+1,updatedAt:iso},expectedVersion:collection.version});
             writes.push({sk:`INCOMING#RECEIPT#${attackId.padStart(16,'0')}`,
               value:{schemaVersion:1,version:1,updatedAt:iso,attackId,botId:bot.id,timestamp:iso,eventType:'ATTACK',
+                ...(policy ? {eventId:`ATTACK:${player}:${attackId}`,actorType:'BOT',actorId:bot.id,
+                  targetType:'PLAYER',targetId:player,targetPlayerId:player,occurredAt:iso,
+                  ...(hit ? {villageId:String(hit.village),facilityId:hit.buildingId} : {})} : {}),
                 shieldConsumed:blocked,result:blocked?'BlockedByShield':'Success',outcome:blocked?'BLOCKED':'HIT',...hit}});
           }
         }
@@ -147,6 +231,7 @@ export class IncomingRaidService {
         return writes.length > 1;
       } catch(e) {
         if(!(e instanceof Error) || !['TransactionCanceledException','ConditionalCheckFailedException'].includes(e.name)) throw e;
+        if (slot !== undefined && await this.store.slotUsed?.(slot)) return true;
         if (c.incomingRaid.targetOffline && c.devFastMode && await this.store.slotUsed?.(Math.floor(this.clock() / MINUTE))) return true;
       }
     }
@@ -182,9 +267,10 @@ export class DynamoIncomingStore implements IncomingStore {
     const {Item} = await this.client.send(new GetCommand({TableName: this.table, Key: this.slotKey, ConsistentRead: true}));
     return typeof Item?.slot === 'number' && Item.slot >= slot;
   }
-  async commit(player:string,writes:{sk:string;value:Record<string,any>;expectedVersion?:number}[],guard?: RaidGuard) {
+  async commit(player:string,writes:IncomingWrite[],guard?: RaidGuard) {
     await this.client.send(new TransactWriteCommand({TransactItems:[
-      ...writes.map(w=>({Put:{TableName:this.table,Item:{...playerKey(player,w.sk),...w.value},
+      ...writes.map(w=>({Put:{TableName:this.table,Item:{...playerKey(player,w.sk),...(w.sk === 'PROGRESS' ? encodeProgress(decodeProgress(w.value)) :
+          w.sk === 'WALLET' ? encodeWallet(decodeWallet(w.value)) : w.value)},
         ConditionExpression:w.expectedVersion===undefined?'attribute_not_exists(PK)':'#v = :v',
         ...(w.expectedVersion===undefined?{}:{ExpressionAttributeNames:{'#v':'version'},ExpressionAttributeValues:{':v':w.expectedVersion}})}})),
       ...(guard ? [{ConditionCheck: {TableName: this.table, Key: playerKey(player, ACTIVITY_KEY),
@@ -198,8 +284,9 @@ export class DynamoIncomingStore implements IncomingStore {
   }
 }
 let service:IncomingRaidService|undefined;
-export async function handler() {
+export async function handler(event?: {time?: string; id?: string}) {
   if(!process.env.PLAYER_TABLE) throw Error('PLAYER_TABLE_NOT_CONFIGURED');
-  service??=new IncomingRaidService(new DynamoIncomingStore(DynamoDBDocumentClient.from(new DynamoDBClient({})),process.env.PLAYER_TABLE),new BotsConfigs());
-  await service.run();
+  service??=new IncomingRaidService(new DynamoIncomingStore(DynamoDBDocumentClient.from(new DynamoDBClient({}), {unmarshallOptions: playerNumberOptions}),process.env.PLAYER_TABLE),new BotsConfigs());
+  const scheduledAt = Date.parse(event?.time ?? '');
+  await service.run(Number.isFinite(scheduledAt) ? scheduledAt : undefined, event?.id);
 }

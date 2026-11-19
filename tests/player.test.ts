@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { DEFAULT_BOTS } from '../src/bots-config.js';
 import { parseConfig } from '../src/game-config.js';
 import { describe, it, expect, vi } from 'vitest';
-import { NumberValue, TransactGetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, NumberValue, TransactGetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { decimalString, longString, newSave, progressSchema, type Save, type Principal } from '../src/model.js';
 import { DynamoPlayerRepository, authKey, type PlayerRepository } from '../src/repository.js';
 import { PlayerService } from '../src/service.js';
@@ -144,7 +144,7 @@ describe('DynamoDB contracts (mocked SDK, no AWS calls)', () => {
   });
   it('composes all required items in one conditional transaction using exact numbers', async () => {
     const { send, repository } = dynamo(); send.mockResolvedValue({});
-    const s = save(); s.progress.distance = '12345678901234567890.12345678';
+    const s = save(); s.profile.nickname = 'Desert Rider'; s.progress.distance = '12345678901234567890.12345678';
     await repository.create(principal, s);
     expect(send).toHaveBeenCalledTimes(1);
     const command = send.mock.calls[0]![0] as TransactWriteCommand;
@@ -156,7 +156,7 @@ describe('DynamoDB contracts (mocked SDK, no AWS calls)', () => {
   });
   it('reads a transactional snapshot and preserves exact decimals and long counters', async () => {
     const { send, repository } = dynamo(), s = save();
-    send.mockResolvedValue({ Responses: [{ Item: { ...s.profile } }, { Item: { ...s.progress,
+    send.mockResolvedValue({ Responses: [{ Item: { ...s.profile, nickname: 'Desert Rider' } }, { Item: { ...s.progress,
       distance: NumberValue.from('12345678901234567890.12345678'),
       constructionStars: NumberValue.from('9223372036854775807'), lastDistanceMilestone: 0 } }, { Item: s.wallet }] });
     const result = await repository.read(s.profile.playerId);
@@ -171,12 +171,67 @@ describe('DynamoDB contracts (mocked SDK, no AWS calls)', () => {
   });
   it('restores DynamoDB exponent notation without a floating point conversion', async () => {
     const { send, repository } = dynamo(), s = save();
-    send.mockResolvedValue({ Responses: [{ Item: s.profile }, { Item: { ...s.progress, distance: NumberValue.from('1E-28') } }, { Item: s.wallet }] });
+    send.mockResolvedValue({ Responses: [{ Item: { ...s.profile, nickname: 'Desert Rider' } }, { Item: { ...s.progress, distance: NumberValue.from('1E-28') } }, { Item: s.wallet }] });
     expect((await repository.read(s.profile.playerId))?.progress.distance).toBe('0.0000000000000000000000000001');
   });
   it('does not return another identity or expose stored validation details', async () => {
     const { send, repository } = dynamo(), s = save();
     send.mockResolvedValue({ Responses: [{ Item: s.profile }, { Item: s.progress }, { Item: s.wallet }] });
     await expect(repository.read(save().profile.playerId)).rejects.toThrow('Player identity mismatch');
+  });
+});
+
+describe('Persistent default nickname assignment', () => {
+  function nicknameTable() {
+    const { send, repository } = dynamo();
+    const data = new Map<string, Record<string, any>>();
+    const key = (item: Record<string, any>) => `${item.PK}/${item.SK}`;
+    const conflict = () => Object.assign(new Error('Concurrent write'), {
+      name: 'TransactionCanceledException', CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+    });
+    send.mockImplementation(async command => {
+      if (command instanceof GetCommand) return { Item: data.get(key(command.input.Key!)) };
+      if (command instanceof TransactGetCommand)
+        return { Responses: command.input.TransactItems!.map(({ Get }) => ({ Item: data.get(key(Get!.Key!)) })) };
+      const puts = (command as TransactWriteCommand).input.TransactItems!.map(item => item.Put!);
+      for (const put of puts) {
+        const item = data.get(key(put.Item!));
+        const values = put.ExpressionAttributeValues;
+        if (put.ConditionExpression === 'attribute_not_exists(PK)' ? item !== undefined
+          : put.Item!.SK === 'COUNTER' ? item?.lastNumber !== values?.[':last']
+          : item?.version !== values?.[':version'] || item?.nickname !== values?.[':previous']) throw conflict();
+      }
+      for (const put of puts) data.set(key(put.Item!), put.Item!);
+      return {};
+    });
+    return { repository, data };
+  }
+
+  it('assigns unique names to parallel guests and reuses each committed profile on reconnect', async () => {
+    const { repository, data } = nicknameTable();
+    const service = new PlayerService(repository, save);
+    const guests = Array.from({ length: 8 }, (_, i) => ({ ...principal, subject: `guest-${i}` }));
+    const results = await Promise.all(guests.map(guest => service.createGuest(guest)));
+    expect(results.map(r => r.save.profile.nickname).sort()).toEqual(guests.map((_, i) => `Player 000${i + 1}`));
+    const reconnects = await Promise.all(guests.map(guest => service.read(guest)));
+    expect(reconnects).toEqual(results.map(r => r.save));
+    expect(data.get('SYSTEM#PLAYER_NICKNAME/COUNTER')?.lastNumber).toBe(8);
+  });
+
+  it('shares the sequence with legacy repairs and preserves an existing nickname and UUID', async () => {
+    const { repository, data } = nicknameTable();
+    const service = new PlayerService(repository, save);
+    const { save: first } = await service.createGuest(principal);
+    expect(first.profile.nickname).toBe('Player 0001');
+    const legacy = ['YOU', '', '  ', undefined, null, 'Desert Rider', 'You'].map(nickname => ({ ...save().profile, nickname }));
+    for (const profile of legacy)
+      data.set(`PLAYER#${profile.playerId}/PROFILE`, profile);
+    const profiles = await Promise.all([...legacy, legacy[0]!].map(profile => repository.ensureProfileNickname(profile.playerId)));
+    expect(profiles.slice(0, 5).map(profile => profile?.nickname).sort())
+      .toEqual(['Player 0002', 'Player 0003', 'Player 0004', 'Player 0005', 'Player 0006']);
+    expect(profiles[5]).toEqual(legacy[5]);
+    expect(profiles[6]).toEqual(legacy[6]);
+    expect(profiles[0]).toEqual(profiles[7]);
+    expect(profiles[0]?.playerId).toBe(legacy[0]?.playerId);
   });
 });

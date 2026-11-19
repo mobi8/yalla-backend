@@ -359,7 +359,7 @@
         "ScheduleExpression": {
           "Fn::If": [
             "IsDev",
-            "rate(1 minute)",
+            "rate(15 minutes)",
             "rate(5 minutes)"
           ]
         },

@@ -2,7 +2,11 @@
 import json
 from pathlib import Path
 
-root = Path(__file__).parent
+root = Path(__file__).resolve().parent
+dev_schedule_minutes = json.loads((root.parent / "config/dev/bots.json").read_text())["offlinePolicy"]["scheduleMinutes"]
+if type(dev_schedule_minutes) is not int or not 1 <= dev_schedule_minutes <= 1440:
+    raise ValueError("offlinePolicy.scheduleMinutes must be an integer between 1 and 1440")
+dev_schedule = f"rate({dev_schedule_minutes} " + ("minute)" if dev_schedule_minutes == 1 else "minutes)")
 ref = lambda name: {"Ref": name}
 sub = lambda text: {"Fn::Sub": text}
 arn = lambda name: {"Fn::GetAtt": [name, "Arn"]}
@@ -76,7 +80,7 @@ resources["IncomingFunction"] = {"Type":"AWS::Lambda::Function","DependsOn":"Inc
     "Handler":"dist/incoming-raid.handler","MemorySize":256,"Timeout":300,"Role":arn("IncomingRole"),
     "Code":{"S3Bucket":ref("ArtifactBucket"),"S3Key":ref("ArtifactKey")},
     "Environment":{"Variables":{"PLAYER_TABLE":ref("PlayerTable"),"GAME_CONFIG_BUCKET":"yalla-result-pools-533266967583","ENVIRONMENT":ref("Environment")}}}}
-resources["IncomingRule"] = {"Type":"AWS::Events::Rule","Properties":{"ScheduleExpression":{"Fn::If":["IsDev","rate(1 minute)","rate(5 minutes)"]},"State":"ENABLED","Targets":[{"Id":"incoming-raid","Arn":arn("IncomingFunction")}]}}
+resources["IncomingRule"] = {"Type":"AWS::Events::Rule","Properties":{"ScheduleExpression":{"Fn::If":["IsDev",dev_schedule,"rate(5 minutes)"]},"State":"ENABLED","Targets":[{"Id":"incoming-raid","Arn":arn("IncomingFunction")}]}}
 resources["IncomingPermission"] = {"Type":"AWS::Lambda::Permission","Properties":{"FunctionName":ref("IncomingFunction"),"Action":"lambda:InvokeFunction","Principal":"events.amazonaws.com","SourceArn":arn("IncomingRule")}}
 for prefix in ["Auth", "Player"]:
     statements = [

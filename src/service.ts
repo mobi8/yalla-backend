@@ -22,6 +22,8 @@ export class PlayerService {
       if (winner) return { created: false, save: await this.read(principal) };
       throw error;
     }
-    return { created: true, save };
+    const committed = await this.repository.read(save.profile.playerId);
+    if (!committed) throw new Error('Created player is missing');
+    return { created: true, save: committed };
   }
 }

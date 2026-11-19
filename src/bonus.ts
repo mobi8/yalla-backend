@@ -1,7 +1,8 @@
+import { WALLET_RAID_PREFIX } from './incoming-wallet-raid.js';
 import { newBonusState, syncRaidBots } from './raid-bots.js';
 export { mirrorBots } from './raid-bots.js';
 import { regenBot } from './balance.js';
-import { BotsConfigs, shieldRegenHours, type BotsSource } from './bots-config.js';
+import { BotsConfigs, type BotsSource } from './bots-config.js';
 import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
@@ -108,9 +109,17 @@ export class BonusService {
       const visibleBots=state.raid.bots.filter((b:Item)=>(b.worldId===drop.save.progress.worldId && b.village===drop.save.progress.village && botSettings.bots.some(t=>t.id===b.profileTemplateId && t.defenseEnabled)) || b.botId===state.raid.activeRaid?.botId);
       const visibleState:Item={...state,raid:{...state.raid,bots:visibleBots}};
       const incomingRaid=(await this.db.list(player,'INCOMING#RECEIPT#',40)).sort((a,b)=>b._key.localeCompare(a._key)).slice(0,40).map(({_key,...record})=>record);
+      const walletRaid = botSettings.offlinePolicy ? await this.db.list(player, WALLET_RAID_PREFIX, 40) : [];
+      const incomingActivity = [
+        ...incomingRaid.filter(event => typeof event.eventId === 'string'),
+        ...walletRaid.map(({eventId,eventType,actorType,actorId,targetType,targetId,targetPlayerId,
+          occurredAt,result,outcome,stolenYP,shieldConsumed}) => ({eventId,eventType,actorType,actorId,
+          targetType,targetId,targetPlayerId,occurredAt,result,outcome,stolenYP,shieldConsumed})),
+      ].sort((a,b)=>b.occurredAt.localeCompare(a.occurredAt) || b.eventId.localeCompare(a.eventId)).slice(0,40);
       const latestCollection=await this.db.get(player,'COLLECTION');
       if (drop.collection?.version !== latestCollection?.version) continue;
-      return {...drop,bonus:visibleState,incomingRaid,bagRaid:publicRaidReceipt(bagRaid)??null,
+      if (walletRaid.length && (await this.db.get(player,'WALLET'))?.version !== drop.save.wallet.version) continue;
+      return {...drop,bonus:visibleState,incomingRaid,incomingActivity,bagRaid:publicRaidReceipt(bagRaid)??null,
         costume:{ownedIds:costume?.ownedIds??[],equipped:costume?.equipped??{},prices:currentRaidConfig.data.costumePrices??{}},settings:{jackpot:jackpotConfig,raid:raidConfig,
         collection:await this.configs.load('collection'),journey:await this.configs.load('journey')}};
     }
@@ -229,7 +238,7 @@ export class BonusService {
       if(op.worldId!==ctx.save.progress.worldId || op.village!==ctx.save.progress.village) throw new ApiError(409,'PROGRESS_CHANGED');
       if(ctx.collection.raidTickets<op.ticketCost) throw new ApiError(409,'INSUFFICIENT_RAID_TICKETS');
       const storedBot=state.raid.bots.find((b:Item)=>b.botId===op.botId);
-      const bot=storedBot && regenBot(storedBot as {shieldCount:number; shieldRegenAt?:string | null},this.clock(),shieldRegenHours(await this.botsConfig.load())) as Item;
+      const bot=storedBot && regenBot(storedBot as {shieldCount:number; shieldRegenAt?:string | null},this.clock(),(await this.botsConfig.load()).shield.regenHours) as Item;
       if(!bot || bot.stateVersion!==op.botStateVersion) throw new ApiError(409,'BOT_STATE_CHANGED');
       const blocked=bot.shieldCount>0,reward=blocked?0:op.eligibleCosts[input.facilityId]*op.multiplier;
       const result={raidId:id,attackerId:player,defenderId:bot.botId,attackerEntityType:'LocalPlayer',defenderEntityType:'SystemBot',

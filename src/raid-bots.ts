@@ -1,5 +1,5 @@
 import { regenBot } from './balance.js';
-import { shieldRegenHours, type BotsConfig } from './bots-config.js';
+import { type BotsConfig } from './bots-config.js';
 import type { GameConfig } from './game-config.js';
 import type { Save } from './model.js';
 
@@ -20,7 +20,7 @@ export function syncRaidBots(progress: Save['progress'], config: GameConfig<'rai
 }
 
 export function regenerateRaidBots(bots: Item[], settings: BotsConfig, now: number) {
-  return bots.map(bot => regenBot(bot as Item & { shieldCount: number }, now, shieldRegenHours(settings)));
+  return bots.map(bot => regenBot(bot as Item & { shieldCount: number }, now, settings.shield.regenHours));
 }
 
 export function newBonusState(updatedAt: string, bots: Item[] = []) {

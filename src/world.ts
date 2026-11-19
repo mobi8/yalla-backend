@@ -55,7 +55,7 @@ export class WorldService {
    const damage=currentVillageDamage(p);
    const repairs=definition.buildings.flatMap(building=>{
     const attackId=damage[building.id];
-    return attackId?[{buildingId:building.id,attackId,cost:repairPrice(building,p.facilityLevels[buildingIds.indexOf(building.id)]!)}]:[];
+    return attackId?[{buildingId:building.id,attackId,cost:repairPrice(building,p.villageDamage?.levelsBefore?.[building.id] ?? p.facilityLevels[buildingIds.indexOf(building.id)]!)}]:[];
    });
    return {...drop,worldState:{...current.value,levels:current.value.levels,worldRunId:p.worldRunId,village:p.village,repairs},unlockedWorldIds:unlocks.value.worldIds,
     currentWorld:definition,catalog:{...catalog,worlds:catalog.worlds.map(({buildings,...w})=>w)}};
@@ -94,7 +94,7 @@ export class WorldService {
    this.checkCurrent(p,input.worldId);
    if(currentVillageDamage(p)[input.buildingId as typeof buildingIds[number]]!==input.attackId)throw new ApiError(409,'BUILDING_DAMAGE_CHANGED');
    const building=w.buildings.find(b=>b.id===input.buildingId)!;
-   cost=repairPrice(building,p.facilityLevels[buildingIds.indexOf(building.id)]!);
+   cost=repairPrice(building,p.villageDamage?.levelsBefore?.[building.id] ?? p.facilityLevels[buildingIds.indexOf(building.id)]!);
    if(ctx.save.wallet.yallaPoint<cost)throw new ApiError(409,'INSUFFICIENT_YALLA_POINT');
   }else if(type==='complete'){
    this.checkCurrent(p,input.worldId);
@@ -153,6 +153,15 @@ export class WorldService {
     if(damage[command.buildingId]!==command.attackId)throw new ApiError(409,'BUILDING_DAMAGE_CHANGED');
     if(w.yallaPoint<intent.cost)throw new ApiError(409,'INSUFFICIENT_YALLA_POINT');
     w.yallaPoint-=intent.cost;
+    const levelBefore = p.villageDamage?.levelsBefore?.[command.buildingId];
+    if (levelBefore !== undefined) {
+     const index = buildingIds.indexOf(command.buildingId);
+     if (p.facilityLevels[index] !== levelBefore - 1) throw new ApiError(409,'BUILDING_DAMAGE_CHANGED');
+     p.facilityLevels[index] = levelBefore;
+     delete p.villageDamage!.levelsBefore![command.buildingId];
+     extras.push({sk:`WORLD#${p.worldId}`,value:{...current.value,...meta(now,(current.stored?.version??0)+1),
+      levels:[...p.facilityLevels]},expectedVersion:current.stored?.version});
+    }
     delete damage[command.buildingId];
     if(!Object.keys(damage).length)delete p.villageDamage;
     result={...result,worldRunId:p.worldRunId,village:p.village,buildingId:command.buildingId,attackId:command.attackId,cost:intent.cost};

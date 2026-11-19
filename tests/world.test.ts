@@ -52,6 +52,37 @@ describe('World 100 catalog and compatibility',()=>{
  });
 });
 describe('World economy and one-way progress',()=>{
+ it('downgrades only an eligible building and atomically restores its lost level at half price',async()=>{
+  const f=await fixture(),p=f.items.get('PROGRESS'),player=f.items.get('PROFILE').playerId;
+  const now=Date.parse(p.updatedAt);
+  f.live.get('world-buildings').data.defaults.upgradePrices=[11,21,31,41];
+  p.facilityLevels=[3,1,1,1,1];p.village=3;p.constructionStars='2';
+  f.items.set('WORLD#dunes',{version:1,worldId:'dunes',levels:[3,1,1,1,1],status:'ACTIVE'});
+  f.items.set('ACTIVITY',{lastActiveAt:new Date(now-360000).toISOString()});
+  const settings=structuredClone(DEFAULT_BOTS);
+  settings.incomingRaid.enabled=true;settings.incomingRaid.targetOffline=true;
+  settings.offlinePolicy={scheduleMinutes:15,offlineMinMinutes:5,offlineMaxHours:24,perPlayerCooldownMinutes:0,dailyLimit:null};
+  const worker=new IncomingRaidService({...f.db,due:async()=>[]},{load:async()=>settings},()=>now);
+  expect(await worker.execute(player)).toBe(true);
+  expect(f.items.get('INCOMING#RECEIPT#0000000000000001')).toMatchObject({
+   eventId:`ATTACK:${player}:1`,eventType:'ATTACK',actorType:'BOT',targetPlayerId:player,
+   facilityId:'building-1',levelBefore:3,levelAfter:2,outcome:'HIT',
+  });
+  const hit=await f.service.state(principal);
+  expect(hit.save.progress).toMatchObject({facilityLevels:[2,1,1,1,1],worldId:'dunes',village:3,worldRunId:p.worldRunId,constructionStars:'2'});
+  expect(hit.worldState.levels).toEqual([2,1,1,1,1]);
+  expect(hit.save.wallet.yallaPoint).toBe(1000);
+  expect(hit.worldState.repairs).toEqual([{buildingId:'building-1',attackId:'1',cost:11}]);
+  expect(await worker.execute(player)).toBe(false);
+  const repair={...await f.cmd(),buildingId:'building-1' as const,attackId:'1'};
+  const results=await Promise.all([f.service.execute(principal,'repair',repair),f.service.execute(principal,'repair',repair)]);
+  for(const result of results){
+   expect(result.worldState.levels).toEqual([3,1,1,1,1]);
+   expect(result.worldState.repairs).toEqual([]);
+   expect(result.save.wallet.yallaPoint).toBe(989);
+   expect(result.save.progress).toMatchObject({facilityLevels:[3,1,1,1,1],worldId:'dunes',village:3,worldRunId:p.worldRunId,constructionStars:'2'});
+  }
+ });
  it('quotes half the previous upgrade rounded up, blocks damaged upgrades and replays repair only once',async()=>{
   const f=await fixture(),p=f.items.get('PROGRESS');
   f.live.get('world-buildings').data.defaults.upgradePrices=[11,21,31,41];

@@ -26,6 +26,7 @@ export const progressSchema = z.strictObject({
   worldRunId: z.string().min(1), worldRunComplete: z.boolean(),
   villageDamage: z.strictObject({
     worldRunId: z.string().min(1), village: z.number().int().min(1).max(5),
+    levelsBefore: z.partialRecord(z.enum(buildingIds), z.number().int().min(2).max(5)).optional(),
     buildings: z.partialRecord(z.enum(buildingIds), z.string().regex(/^\d+$/)),
   }).optional(),
   worldCompletionCounts: z.partialRecord(z.enum(worlds), int),

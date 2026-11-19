@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, TransactGetCommand, TransactWriteCommand, NumberValue,
   type TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
-import { profileSchema, progressSchema, walletSchema, type Principal, type Save } from './model.js';
+import { profileSchema, progressSchema, walletSchema, type Principal, type Profile, type Save } from './model.js';
 import { starterItems } from './starter.js';
 import { newIncomingSchedule } from './incoming-raid.js';
 
@@ -35,6 +35,53 @@ function plainDecimal(value: string): string {
 const exact = (value: unknown): unknown => value instanceof NumberValue ? plainDecimal(value.toString()) :
   typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : value;
 
+const progressNumberFields = ['distance', 'lastDistanceMilestone', 'constructionStars'] as const;
+
+export function decodeProgress(item: Record<string, unknown>) {
+  const data = stripKey(item);
+  for (const key of progressNumberFields) data[key] = exact(data[key]);
+  return progressSchema.parse(data);
+}
+
+export function encodeProgress(progress: Save['progress']) {
+  return {
+    ...progress,
+    distance: NumberValue.from(progress.distance),
+    lastDistanceMilestone: NumberValue.from(progress.lastDistanceMilestone),
+    constructionStars: NumberValue.from(progress.constructionStars),
+  };
+}
+
+export function decodeWallet(item: Record<string, unknown>) {
+  const data = stripKey(item);
+  for (const key of ['energyRechargeAnchor', 'energyRechargeHighWater']) data[key] = exact(data[key]);
+  return walletSchema.parse(data);
+}
+
+export function encodeWallet(wallet: Save['wallet']) {
+  return {
+    ...wallet,
+    energyRechargeAnchor: NumberValue.from(wallet.energyRechargeAnchor),
+    energyRechargeHighWater: NumberValue.from(wallet.energyRechargeHighWater),
+  };
+}
+
+export const playerNumberOptions = {
+  wrapNumbers: (n: string) => Number.isSafeInteger(Number(n)) && /^-?\d+$/.test(n) ? Number(n) : NumberValue.from(n),
+};
+
+const nicknameCounterKey = { PK: 'SYSTEM#PLAYER_NICKNAME', SK: 'COUNTER' };
+const needsNickname = (value: unknown) =>
+  value == null || (typeof value === 'string' && ['', 'YOU'].includes(value.trim()));
+
+function readProfile(item: Record<string, unknown>, playerId: string): Profile {
+  const data = stripKey(item);
+  if (needsNickname(data.nickname)) data.nickname = 'YOU';
+  const profile = profileSchema.parse(data);
+  if (profile.playerId !== playerId) throw new Error('Player identity mismatch');
+  return profile;
+}
+
 export class DynamoPlayerRepository implements PlayerRepository {
   constructor(private client: DynamoDBDocumentClient, private table: string,
     private configs: ConfigSource = new GameConfigs(), private botsConfig: BotsSource = new BotsConfigs()) {
@@ -54,14 +101,67 @@ export class DynamoPlayerRepository implements PlayerRepository {
     const profile = result.Responses?.[0]?.Item, progress = result.Responses?.[1]?.Item, wallet = result.Responses?.[2]?.Item;
     if (!profile && !progress && !wallet) return undefined;
     if (!profile || !progress || !wallet) throw new Error('Incomplete player save');
-    const parsedProfile = profileSchema.parse(stripKey(profile));
-    if (parsedProfile.playerId !== playerId) throw new Error('Player identity mismatch');
-    const data = stripKey(progress);
-    for (const key of ['distance', 'lastDistanceMilestone', 'constructionStars']) data[key] = exact(data[key]);
-    const walletData = stripKey(wallet);
-    for (const key of ['energyRechargeAnchor', 'energyRechargeHighWater']) walletData[key] = exact(walletData[key]);
-    return { profile: parsedProfile, progress: progressSchema.parse(data), wallet: walletSchema.parse(walletData) };
+    const stored = readProfile(profile, playerId);
+    const save = { profile: stored, progress: decodeProgress(progress), wallet: decodeWallet(wallet) };
+    if (needsNickname(stored.nickname)) {
+      const updated = await this.ensureProfileNickname(playerId);
+      if (!updated) throw new Error('Profile missing during nickname assignment');
+      save.profile = updated;
+    }
+    return save;
   }
+
+  async ensureProfileNickname(playerId: string): Promise<Profile | undefined> {
+    return this.retryNicknameWrite(async () => {
+      const { Item } = await this.client.send(new GetCommand({
+        TableName: this.table, Key: playerKey(playerId, 'PROFILE'), ConsistentRead: true,
+      }));
+      if (!Item) return undefined;
+      const profile = readProfile(Item, playerId);
+      if (!needsNickname(profile.nickname)) return profile;
+      const { nickname, write } = await this.nextNickname();
+      const updated = { ...profile, nickname, version: profile.version + 1, updatedAt: new Date().toISOString() };
+      await this.commit([write, { Put: {
+        TableName: this.table, Item: { ...playerKey(playerId, 'PROFILE'), ...updated },
+        ConditionExpression: '#version = :version AND ' +
+          (Item.nickname === undefined ? 'attribute_not_exists(nickname)' : 'nickname = :previous'),
+        ExpressionAttributeNames: { '#version': 'version' },
+        ExpressionAttributeValues: { ':version': profile.version,
+          ...(Item.nickname === undefined ? {} : { ':previous': Item.nickname }) },
+      } }]);
+      return updated;
+    });
+  }
+
+  private async nextNickname() {
+    const { Item } = await this.client.send(new GetCommand({
+      TableName: this.table, Key: nicknameCounterKey, ConsistentRead: true,
+    }));
+    const last: unknown = Item ? Item.lastNumber : 0;
+    if (typeof last !== 'number' || !Number.isSafeInteger(last) || last < (Item ? 1 : 0) || last >= Number.MAX_SAFE_INTEGER)
+      throw new Error('Invalid nickname counter');
+    const number = last + 1;
+    const write: Writes[number] = { Put: {
+      TableName: this.table, Item: { ...nicknameCounterKey, lastNumber: number },
+      ConditionExpression: Item ? 'lastNumber = :last' : 'attribute_not_exists(PK)',
+      ...(Item ? { ExpressionAttributeValues: { ':last': last } } : {}),
+    } };
+    return { nickname: `Player ${String(number).padStart(4, '0')}`, write };
+  }
+
+  private async retryNicknameWrite<T>(write: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try { return await write(); }
+      catch (error) {
+        const reasons = (error as { CancellationReasons?: { Code?: string }[] })?.CancellationReasons;
+        if (!(error instanceof Error) || error.name !== 'TransactionCanceledException' || !reasons?.length ||
+            reasons.some(reason => !['None', 'ConditionalCheckFailed', 'TransactionConflict'].includes(reason.Code ?? 'None')) ||
+            attempt >= 11) throw error;
+        await new Promise(resolve => setTimeout(resolve, Math.random() * Math.min(250, 10 * 2 ** attempt)));
+      }
+    }
+  }
+
   async create(principal: Principal, save: Save): Promise<void> {
     const { profile, progress } = save;
     profileSchema.parse(profile); progressSchema.parse(progress);
@@ -74,12 +174,24 @@ export class DynamoPlayerRepository implements PlayerRepository {
       put({ ...authKey(principal), playerId: profile.playerId, provider: principal.provider, createdAt: profile.createdAt,
         schemaVersion: 1, version: 1, updatedAt: profile.createdAt }),
       put({ ...playerKey(profile.playerId, 'PROFILE'), ...profile }),
-      put({ ...playerKey(profile.playerId, 'PROGRESS'), ...progress, distance: NumberValue.from(progress.distance),
-        lastDistanceMilestone: NumberValue.from(progress.lastDistanceMilestone), constructionStars: NumberValue.from(progress.constructionStars) }),
+      put({ ...playerKey(profile.playerId, 'PROGRESS'), ...encodeProgress(progress) }),
       ...starterItems(save, principal).map(put),
       put({ ...playerKey(profile.playerId, 'BONUS#STATE'), ...newBonusState(profile.createdAt, bots) }),
       put({ ...playerKey(profile.playerId, 'INCOMING#SCHEDULE'), ...newIncomingSchedule(profile.playerId, Date.parse(profile.createdAt)) }),
     ];
+    if (!needsNickname(profile.nickname)) return this.commit(writes);
+    await this.retryNicknameWrite(async () => {
+      // Preserve the existing auth-link condition and avoid retrying a losing duplicate guest creation.
+      if (await this.find(principal)) throw new ApiError(409, 'PLAYER_ALREADY_EXISTS');
+      const { nickname, write } = await this.nextNickname();
+      const namedProfile = { ...profile, nickname };
+      const namedWrites = [...writes];
+      namedWrites[1] = put({ ...playerKey(profile.playerId, 'PROFILE'), ...namedProfile });
+      await this.commit([write, ...namedWrites]);
+    });
+  }
+
+  private async commit(writes: Writes) {
     await this.client.send(new TransactWriteCommand({ TransactItems: writes,
       ClientRequestToken: createHash('sha256').update(JSON.stringify(writes)).digest('hex').slice(0, 36) }));
   }
@@ -88,7 +200,7 @@ export class DynamoPlayerRepository implements PlayerRepository {
 export function createDynamoRepository(table: string): DynamoPlayerRepository {
   // Local development: AWS_PROFILE=yalla-dev. Lambda uses its execution role.
   const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: process.env.AWS_REGION ?? 'ap-south-1' }), {
-    unmarshallOptions: { wrapNumbers: n => Number.isSafeInteger(Number(n)) && /^-?\d+$/.test(n) ? Number(n) : NumberValue.from(n) },
+    unmarshallOptions: playerNumberOptions,
   });
   return new DynamoPlayerRepository(client, table);
 }
