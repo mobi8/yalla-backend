@@ -8,12 +8,13 @@ import { createBonusService, bonusInput, kindInput, raidBeginInput, attackInput,
 import { createDropService, beginSchema, resultSchema, cancelSchema, type DropService } from './drop.js';
 import type { Principal } from './model.js';
 import { ApiError, createDynamoRepository } from './repository.js';
+import { activityQuery, createJourneyReadService, rankingQuery, type JourneyReadService } from './journey-read.js';
 import { PlayerService } from './service.js';
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import { CognitoGuestIdentity, guestKeySchema, type GuestIdentity } from './auth.js';
 
 export interface HttpEvent {
-  rawPath: string; body?: string | null; isBase64Encoded?: boolean;
+  rawPath: string; queryStringParameters?: Record<string, string>; body?: string | null; isBase64Encoded?: boolean;
   requestContext: { http: { method: string }; authorizer?: unknown };
 }
 export type Authenticate = (event: HttpEvent) => Promise<Principal>;
@@ -33,7 +34,7 @@ function body(event: HttpEvent): unknown {
   try { return JSON.parse(event.body ? (event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body) : '{}'); }
   catch { throw new ApiError(400, 'INVALID_JSON'); }
 }
-export function createHandler(service: PlayerService, authenticate: Authenticate = cognitoContext, identity?: GuestIdentity, drops?: DropService, bonuses?: BonusService, worlds?: WorldService, recordActivity?: (principal: Principal) => Promise<void>) {
+export function createHandler(service: PlayerService, authenticate: Authenticate = cognitoContext, identity?: GuestIdentity, drops?: DropService, bonuses?: BonusService, worlds?: WorldService, recordActivity?: (principal: Principal) => Promise<void>, journey?: JourneyReadService) {
   return async (event: HttpEvent) => {
     const response = (statusCode: number, data: unknown) => ({ statusCode,
       headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }, body: JSON.stringify(data) });
@@ -58,6 +59,19 @@ export function createHandler(service: PlayerService, authenticate: Authenticate
         if (route.endsWith('/refresh')) return response(200, { tokens: await identity.refresh(input.data.refreshToken) });
         await identity.revoke(input.data.refreshToken);
         return response(200, { revoked: true });
+      }
+      if (route === 'GET /ranking/distance' || route === 'GET /players/me/activity') {
+        const principal = await activePrincipal();
+        if (!journey) throw new ApiError(503, 'JOURNEY_READ_NOT_CONFIGURED');
+        const query = event.queryStringParameters ?? {};
+        if (route === 'GET /ranking/distance') {
+          const input = rankingQuery.safeParse(query);
+          if (!input.success) throw new ApiError(400, 'INVALID_REQUEST');
+          return response(200, await journey.ranking(principal, input.data));
+        }
+        const input = activityQuery.safeParse(query);
+        if (!input.success) throw new ApiError(400, 'INVALID_REQUEST');
+        return response(200, await journey.activity(principal, input.data));
       }
       if(event.rawPath.startsWith('/worlds/')) {
         if(!worlds)throw new ApiError(503,'WORLD_NOT_CONFIGURED');
@@ -172,7 +186,7 @@ export async function handler(event: HttpEvent | z.infer<typeof opsNicknameReque
       const playerId = await players.find(principal);
       if (!playerId) throw new ApiError(404, 'PLAYER_NOT_FOUND');
       await activity.record(playerId);
-    });
+    }, createJourneyReadService(process.env.PLAYER_TABLE, players));
   }
   return configured(event);
 }

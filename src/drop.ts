@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { GameConfigs, type ConfigSource, type GameConfig } from './game-config.js';
 import { ApiError, createDynamoRepository, playerKey, type PlayerRepository } from './repository.js';
 import type { Principal, Save, Wallet, Progress } from './model.js';
+import { journeyReadKeys, withoutJourneyKeys } from './journey-read-keys.js';
 import { ResultPools, color, outcomeSchema, type AssignedSet, type Outcome, type PoolSource } from './pools.js';
 import { collectionSchema, newCollection, recharge, settle, multiplier, type Collection } from './drop-economy.js';
 export const requestId = z.string().uuid();
@@ -24,7 +25,7 @@ export class DynamoDropStore implements DropStore {
   constructor(private client: DynamoDBDocumentClient, private table: string) {}
   async get(player: string, sk: string) {
     const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: playerKey(player, sk), ConsistentRead: true }));
-    if (!Item) return undefined; const { PK, SK, ...value } = Item; return value;
+    if (!Item) return undefined; const { PK, SK, ...value } = Item; return withoutJourneyKeys(value);
   }
   async list(player: string, prefix: string, newestLimit?: number): Promise<Item[]> {
     const items: Item[] = []; let cursor: Record<string, any> | undefined;
@@ -32,14 +33,14 @@ export class DynamoDropStore implements DropStore {
       const result = await this.client.send(new QueryCommand({ TableName: this.table,
         KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)', ExpressionAttributeValues: { ':pk': `PLAYER#${player}`, ':sk': prefix },
         ConsistentRead: true, ExclusiveStartKey: cursor, ...(newestLimit ? { ScanIndexForward: false, Limit: newestLimit-items.length } : {}) }));
-      for (const { PK, SK, ...value } of result.Items ?? []) items.push({ ...value, _key: SK });
+      for (const { PK, SK, ...value } of result.Items ?? []) items.push({ ...withoutJourneyKeys(value), _key: SK });
       cursor = result.LastEvaluatedKey;
     } while (cursor && (!newestLimit || items.length < newestLimit));
     return items;
   }
   async commit(player: string, writes: Write[]) {
     await this.client.send(new TransactWriteCommand({ TransactItems: writes.map(w => {
-      const value = { ...w.value };
+      const value: Item = { ...w.value, ...journeyReadKeys(player, w.sk, w.value) };
       for (const k of w.sk === 'WALLET' ? ['energyRechargeAnchor', 'energyRechargeHighWater'] :
         w.sk === 'PROGRESS' ? ['distance', 'lastDistanceMilestone', 'constructionStars'] : []) value[k] = NumberValue.from(value[k]);
       return { Put: { TableName: this.table, Item: { ...playerKey(player, w.sk), ...value },

@@ -87,6 +87,7 @@
     "walletRaid": {
       "enabled": true,
       "protectedBalanceBps": 5000,
+      "minimumTargetYP": 100,
       "bagWeightsBps": [2000, 2000, 1000, 0, 0]
     }
   }

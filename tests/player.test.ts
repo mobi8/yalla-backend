@@ -212,7 +212,7 @@ describe('Persistent default nickname assignment', () => {
     const service = new PlayerService(repository, save);
     const guests = Array.from({ length: 8 }, (_, i) => ({ ...principal, subject: `guest-${i}` }));
     const results = await Promise.all(guests.map(guest => service.createGuest(guest)));
-    expect(results.map(r => r.save.profile.nickname).sort()).toEqual(guests.map((_, i) => `Player 000${i + 1}`));
+    expect(results.map(r => r.save.profile.nickname).sort()).toEqual(guests.map((_, i) => `Guest 000${i + 1}`));
     const reconnects = await Promise.all(guests.map(guest => service.read(guest)));
     expect(reconnects).toEqual(results.map(r => r.save));
     expect(data.get('SYSTEM#PLAYER_NICKNAME/COUNTER')?.lastNumber).toBe(8);
@@ -222,16 +222,31 @@ describe('Persistent default nickname assignment', () => {
     const { repository, data } = nicknameTable();
     const service = new PlayerService(repository, save);
     const { save: first } = await service.createGuest(principal);
-    expect(first.profile.nickname).toBe('Player 0001');
+    expect(first.profile.nickname).toBe('Guest 0001');
     const legacy = ['YOU', '', '  ', undefined, null, 'Desert Rider', 'You'].map(nickname => ({ ...save().profile, nickname }));
     for (const profile of legacy)
       data.set(`PLAYER#${profile.playerId}/PROFILE`, profile);
     const profiles = await Promise.all([...legacy, legacy[0]!].map(profile => repository.ensureProfileNickname(profile.playerId)));
     expect(profiles.slice(0, 5).map(profile => profile?.nickname).sort())
-      .toEqual(['Player 0002', 'Player 0003', 'Player 0004', 'Player 0005', 'Player 0006']);
+      .toEqual(['Guest 0002', 'Guest 0003', 'Guest 0004', 'Guest 0005', 'Guest 0006']);
     expect(profiles[5]).toEqual(legacy[5]);
     expect(profiles[6]).toEqual(legacy[6]);
     expect(profiles[0]).toEqual(profiles[7]);
     expect(profiles[0]?.playerId).toBe(legacy[0]?.playerId);
   });
+  it('converts previous numbered names once without consuming another number', async () => {
+    const { repository, data } = nicknameTable();
+    const service = new PlayerService(repository, save);
+    const { save: created } = await service.createGuest(principal);
+    const key = `PLAYER#${created.profile.playerId}/PROFILE`;
+    data.set(key, { ...data.get(key), nickname: 'Player 0001' });
+    const [first, second] = await Promise.all([service.read(principal), service.read(principal)]);
+    expect(first.profile).toEqual(second.profile);
+    expect(first.profile.nickname).toBe('Guest 0001');
+    expect(first.profile.playerId).toBe(created.profile.playerId);
+    expect(first.profile.version).toBe(created.profile.version + 1);
+    expect(data.get('SYSTEM#PLAYER_NICKNAME/COUNTER')?.lastNumber).toBe(1);
+    expect((await service.read(principal)).profile).toEqual(first.profile);
+  });
+
 });

@@ -15,6 +15,12 @@
     },
     "ArtifactKey": {
       "Type": "String"
+    },
+    "RankingPeriodDays": {
+      "Type": "Number",
+      "Default": 1,
+      "MinValue": 1,
+      "MaxValue": 31
     }
   },
   "Conditions": {
@@ -57,6 +63,14 @@
           },
           {
             "AttributeName": "lastActiveAt",
+            "AttributeType": "S"
+          },
+          {
+            "AttributeName": "journeyPK",
+            "AttributeType": "S"
+          },
+          {
+            "AttributeName": "journeySK",
             "AttributeType": "S"
           }
         ],
@@ -104,6 +118,25 @@
             ],
             "Projection": {
               "ProjectionType": "KEYS_ONLY"
+            }
+          },
+          {
+            "IndexName": "JourneyRead",
+            "KeySchema": [
+              {
+                "AttributeName": "journeyPK",
+                "KeyType": "HASH"
+              },
+              {
+                "AttributeName": "journeySK",
+                "KeyType": "RANGE"
+              }
+            ],
+            "Projection": {
+              "ProjectionType": "INCLUDE",
+              "NonKeyAttributes": [
+                "rankDistance"
+              ]
             }
           }
         ],
@@ -541,6 +574,9 @@
             "ENVIRONMENT": {
               "Ref": "Environment"
             },
+            "RANKING_PERIOD_DAYS": {
+              "Ref": "RankingPeriodDays"
+            },
             "RESULT_POLICY": "PERMISSIVE",
             "GAME_CONFIG_BUCKET": "yalla-result-pools-533266967583",
             "RESULT_POOL_BUCKET": "yalla-result-pools-533266967583",
@@ -652,12 +688,17 @@
                   "Action": [
                     "dynamodb:Query"
                   ],
-                  "Resource": {
-                    "Fn::GetAtt": [
-                      "PlayerTable",
-                      "Arn"
-                    ]
-                  }
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "PlayerTable",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::Sub": "${PlayerTable.Arn}/index/JourneyRead"
+                    }
+                  ]
                 },
                 {
                   "Effect": "Allow",
@@ -766,6 +807,9 @@
             },
             "ENVIRONMENT": {
               "Ref": "Environment"
+            },
+            "RANKING_PERIOD_DAYS": {
+              "Ref": "RankingPeriodDays"
             },
             "RESULT_POLICY": "PERMISSIVE",
             "GAME_CONFIG_BUCKET": "yalla-result-pools-533266967583",
@@ -1178,6 +1222,60 @@
           "Ref": "Api"
         },
         "RouteKey": "POST /drop/sessions/{sessionId}/rounds/{roundId}/cancel",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "DistanceRankingRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /ranking/distance",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "PlayerActivityFeedRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /players/me/activity",
         "Target": {
           "Fn::Join": [
             "/",

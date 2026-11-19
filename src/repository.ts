@@ -6,6 +6,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, TransactGetCommand, TransactWriteCommand, NumberValue,
   type TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb';
 import { profileSchema, progressSchema, walletSchema, type Principal, type Profile, type Save } from './model.js';
+import { journeyReadKeys, withoutJourneyKeys } from './journey-read-keys.js';
 import { starterItems } from './starter.js';
 import { newIncomingSchedule } from './incoming-raid.js';
 
@@ -38,7 +39,7 @@ const exact = (value: unknown): unknown => value instanceof NumberValue ? plainD
 const progressNumberFields = ['distance', 'lastDistanceMilestone', 'constructionStars'] as const;
 
 export function decodeProgress(item: Record<string, unknown>) {
-  const data = stripKey(item);
+  const data = withoutJourneyKeys(stripKey(item));
   for (const key of progressNumberFields) data[key] = exact(data[key]);
   return progressSchema.parse(data);
 }
@@ -74,6 +75,8 @@ const nicknameCounterKey = { PK: 'SYSTEM#PLAYER_NICKNAME', SK: 'COUNTER' };
 const needsNickname = (value: unknown) =>
   value == null || (typeof value === 'string' && ['', 'YOU'].includes(value.trim()));
 
+const previousDefault = /^Player ([0-9]{4}|[1-9][0-9]{4,})$/;
+
 function readProfile(item: Record<string, unknown>, playerId: string): Profile {
   const data = stripKey(item);
   if (needsNickname(data.nickname)) data.nickname = 'YOU';
@@ -103,7 +106,7 @@ export class DynamoPlayerRepository implements PlayerRepository {
     if (!profile || !progress || !wallet) throw new Error('Incomplete player save');
     const stored = readProfile(profile, playerId);
     const save = { profile: stored, progress: decodeProgress(progress), wallet: decodeWallet(wallet) };
-    if (needsNickname(stored.nickname)) {
+    if (needsNickname(stored.nickname) || previousDefault.test(stored.nickname)) {
       const updated = await this.ensureProfileNickname(playerId);
       if (!updated) throw new Error('Profile missing during nickname assignment');
       save.profile = updated;
@@ -118,10 +121,12 @@ export class DynamoPlayerRepository implements PlayerRepository {
       }));
       if (!Item) return undefined;
       const profile = readProfile(Item, playerId);
-      if (!needsNickname(profile.nickname)) return profile;
-      const { nickname, write } = await this.nextNickname();
+      const previousNumber = previousDefault.exec(profile.nickname)?.[1];
+      if (!previousNumber && !needsNickname(profile.nickname)) return profile;
+      const allocation = previousNumber ? undefined : await this.nextNickname();
+      const nickname = allocation?.nickname ?? `Guest ${previousNumber}`;
       const updated = { ...profile, nickname, version: profile.version + 1, updatedAt: new Date().toISOString() };
-      await this.commit([write, { Put: {
+      await this.commit([...(allocation ? [allocation.write] : []), { Put: {
         TableName: this.table, Item: { ...playerKey(playerId, 'PROFILE'), ...updated },
         ConditionExpression: '#version = :version AND ' +
           (Item.nickname === undefined ? 'attribute_not_exists(nickname)' : 'nickname = :previous'),
@@ -146,7 +151,7 @@ export class DynamoPlayerRepository implements PlayerRepository {
       ConditionExpression: Item ? 'lastNumber = :last' : 'attribute_not_exists(PK)',
       ...(Item ? { ExpressionAttributeValues: { ':last': last } } : {}),
     } };
-    return { nickname: `Player ${String(number).padStart(4, '0')}`, write };
+    return { nickname: `Guest ${String(number).padStart(4, '0')}`, write };
   }
 
   private async retryNicknameWrite<T>(write: () => Promise<T>): Promise<T> {
@@ -174,7 +179,7 @@ export class DynamoPlayerRepository implements PlayerRepository {
       put({ ...authKey(principal), playerId: profile.playerId, provider: principal.provider, createdAt: profile.createdAt,
         schemaVersion: 1, version: 1, updatedAt: profile.createdAt }),
       put({ ...playerKey(profile.playerId, 'PROFILE'), ...profile }),
-      put({ ...playerKey(profile.playerId, 'PROGRESS'), ...encodeProgress(progress) }),
+      put({ ...playerKey(profile.playerId, 'PROGRESS'), ...encodeProgress(progress), ...journeyReadKeys(profile.playerId, 'PROGRESS', progress) }),
       ...starterItems(save, principal).map(put),
       put({ ...playerKey(profile.playerId, 'BONUS#STATE'), ...newBonusState(profile.createdAt, bots) }),
       put({ ...playerKey(profile.playerId, 'INCOMING#SCHEDULE'), ...newIncomingSchedule(profile.playerId, Date.parse(profile.createdAt)) }),

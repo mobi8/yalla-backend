@@ -175,7 +175,7 @@ describe('incoming raid worker',()=>{
     walletRaid:{enabled:true,protectedBalanceBps:5000,bagWeightsBps:[3000,2000,1000,0,0]}}}).success).toBe(false);
  });
 
- it('keeps the starting bags across a wallet conflict and commits only once for a slot',async()=>{
+ it.each([99,100])('rechecks eligibility at %i YP after a wallet conflict',async latestYP=>{
   const f=fixture(1), player=DEV_RAID_PLAYER, iso=new Date(t).toISOString();
   const items=f.values;
   items.set('ACTIVITY',{lastActiveAt:new Date(t-360000).toISOString()});
@@ -193,7 +193,7 @@ describe('incoming raid worker',()=>{
       if (!conflicted && writes.some(w=>w.sk==='WALLET')) {
         conflicted=true;
         const wallet=items.get('WALLET');
-        items.set('WALLET',{...wallet,version:wallet.version+1,yallaPoint:1});
+        items.set('WALLET',{...wallet,version:wallet.version+1,yallaPoint:latestYP});
       }
       if (!guard?.slot || guard.slot<=latestSlot || writes.some(w=>items.get(w.sk)?.version!==w.expectedVersion)) {
         const error=new Error();error.name='TransactionCanceledException';throw error;
@@ -206,11 +206,49 @@ describe('incoming raid worker',()=>{
   await worker.run(t);
   await worker.run(t);
   const receipt=items.get(WALLET_RAID_PREFIX+'0000000000000001');
+  if (latestYP === 99) {
+    expect(receipt).toBeUndefined();
+    expect(latestSlot).toBe(-1);
+    expect(items.get('WALLET').yallaPoint).toBe(99);
+    expect(items.get('INCOMING#SCHEDULE').sequence).toBe(1);
+    return;
+  }
   expect(receipt).toMatchObject({eventType:'RAID',eventId:`RAID:${player}:1`,startYP:107,
-    balanceBefore:1,balanceAfter:1,stolenYP:0,burnedYP:0,shieldConsumed:false});
+    balanceBefore:100,shieldConsumed:false});
+  expect(receipt.stolenYP).toBe(walletRaidDebit(receipt.selectedYP,100,5000));
+  expect(receipt.balanceAfter).toBe(100-receipt.stolenYP);
   expect([...receipt.bags].sort((a,b)=>a-b)).toEqual([0,0,10,21,21]);
   expect(items.get('COLLECTION').shieldCount).toBe(1);
   expect([...items.keys()].filter(key=>key.startsWith(WALLET_RAID_PREFIX))).toHaveLength(1);
+ });
+
+ it.each([100,99])('skips missing and low wallets before a final %i YP candidate',async finalYP=>{
+  const players=[DEV_RAID_PLAYER,'65388836-ddcd-47ec-983e-fe3ab330b4e0','f7f8e4ad-cde0-4ef0-a6d9-cd7f75a61791'];
+  const checked:string[]=[], settled:string[]=[];
+  const settings=structuredClone(config);
+  settings.offlinePolicy!.attackRaidWeights={ATTACK:0,RAID:1};
+  const worker=new IncomingRaidService({
+    due:async()=>[],
+    offline:async function*(){yield* players;},
+    get:async(player,key)=>{
+      if(key==='PROFILE') return {playerId:player};
+      if(key==='ACTIVITY') return {lastActiveAt:new Date(t-360000).toISOString()};
+      if(key!=='WALLET') return;
+      checked.push(player);
+      const index=players.indexOf(player);
+      if(index!==0) return {...newSave().wallet,yallaPoint:index===1?99:finalYP};
+    },
+    commit:async(player,writes)=>{
+      settled.push(player);
+      const receipt=writes.find(write=>write.sk.startsWith(WALLET_RAID_PREFIX))!.value;
+      expect(receipt.balanceBefore).toBe(100);
+      expect(receipt.balanceAfter).toBe(100-receipt.stolenYP);
+      expect(receipt.stolenYP).toBeGreaterThan(0);
+    },
+  },{load:async()=>settings},()=>t);
+  await worker.run(t);
+  expect(checked).toEqual(players);
+  expect(settled).toEqual(finalYP===100?[players[2]]:[]);
  });
 
 });

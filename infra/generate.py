@@ -27,14 +27,17 @@ storage['Resources']['ArtifactTransportPolicy'] = {"Type": "AWS::S3::BucketPolic
         "Condition": {"Bool": {"aws:SecureTransport": "false"}},
     }]}}}
 parameters = {"Environment": {"Type": "String", "AllowedValues": ["dev", "staging", "prod"], "Default": "dev"},
-              "ArtifactBucket": {"Type": "String"}, "ArtifactKey": {"Type": "String"}}
+              "ArtifactBucket": {"Type": "String"}, "ArtifactKey": {"Type": "String"},
+              "RankingPeriodDays": {"Type": "Number", "Default": 1, "MinValue": 1, "MaxValue": 31}}
 resources = {
     "PlayerTable": {"Type": "AWS::DynamoDB::Table", **retain, "Properties": {
-        "BillingMode": "PAY_PER_REQUEST", "AttributeDefinitions": [{"AttributeName": k, "AttributeType": "S"} for k in ["PK", "SK", "duePartition", "dueAt", "activityPartition", "lastActiveAt"]],
+        "BillingMode": "PAY_PER_REQUEST", "AttributeDefinitions": [{"AttributeName": k, "AttributeType": "S"} for k in ["PK", "SK", "duePartition", "dueAt", "activityPartition", "lastActiveAt", "journeyPK", "journeySK"]],
         "KeySchema": [{"AttributeName": "PK", "KeyType": "HASH"}, {"AttributeName": "SK", "KeyType": "RANGE"}],
         "GlobalSecondaryIndexes": [{"IndexName": "IncomingDue", "KeySchema": [{"AttributeName": "duePartition", "KeyType": "HASH"}, {"AttributeName": "dueAt", "KeyType": "RANGE"}], "Projection": {"ProjectionType": "INCLUDE", "NonKeyAttributes": ["playerId"]}},
             {"IndexName": "PlayerActivity", "KeySchema": [{"AttributeName": "activityPartition", "KeyType": "HASH"}, {"AttributeName": "lastActiveAt", "KeyType": "RANGE"}],
-             "Projection": {"ProjectionType": "KEYS_ONLY"}}],
+             "Projection": {"ProjectionType": "KEYS_ONLY"}},
+            {"IndexName": "JourneyRead", "KeySchema": [{"AttributeName": "journeyPK", "KeyType": "HASH"}, {"AttributeName": "journeySK", "KeyType": "RANGE"}],
+             "Projection": {"ProjectionType": "INCLUDE", "NonKeyAttributes": ["rankDistance"]}}],
         "StreamSpecification": {"StreamViewType": "NEW_AND_OLD_IMAGES"},
         "PointInTimeRecoverySpecification": {"PointInTimeRecoveryEnabled": True},
         "SSESpecification": {"SSEEnabled": True},
@@ -91,7 +94,7 @@ for prefix in ["Auth", "Player"]:
     ]
     if prefix == "Player":
         statements += [
-            {"Effect": "Allow", "Action": ["dynamodb:Query"], "Resource": arn("PlayerTable")},
+            {"Effect": "Allow", "Action": ["dynamodb:Query"], "Resource": [arn("PlayerTable"), sub("${PlayerTable.Arn}/index/JourneyRead")]},
             {"Effect": "Allow", "Action": ["dynamodb:PutItem"], "Resource": arn("PlayerTable"),
              "Condition": {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["PLAYER#*"]},
                            "ForAllValues:StringEquals": {"dynamodb:Attributes": ["PK", "SK", "activityPartition", "lastActiveAt"]}}},
@@ -116,7 +119,7 @@ for prefix in ["Auth", "Player"]:
         "Handler": "dist/handler.handler", "MemorySize": 256, "Timeout": 20, "Role": arn(prefix + "Role"),
         "Code": {"S3Bucket": ref("ArtifactBucket"), "S3Key": ref("ArtifactKey")},
         "Environment": {"Variables": {"PLAYER_TABLE": ref("PlayerTable"), "USER_POOL_ID": ref("UserPool"),
-            "USER_POOL_CLIENT_ID": ref("UserPoolClient"), "ENVIRONMENT": ref("Environment"), "RESULT_POLICY": "PERMISSIVE",
+            "USER_POOL_CLIENT_ID": ref("UserPoolClient"), "ENVIRONMENT": ref("Environment"), "RANKING_PERIOD_DAYS": ref("RankingPeriodDays"), "RESULT_POLICY": "PERMISSIVE",
             "GAME_CONFIG_BUCKET": "yalla-result-pools-533266967583", "RESULT_POOL_BUCKET": "yalla-result-pools-533266967583", "RESULT_POOL_PREFIX": "result-pools/v1/",
             "PHYSICS_VERSION": "fixed-fresh-round-v1", "COGNITO_ISSUER": sub("https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}")}},
     }}
@@ -135,6 +138,7 @@ routes += [("DropSessionOpen", "POST /drop/sessions", "Player"),
            ("DropRoundGet", "GET /drop/sessions/{sessionId}/rounds/{roundId}", "Player"),
            ("DropRoundResult", "POST /drop/sessions/{sessionId}/rounds/{roundId}/result", "Player"),
            ("DropRoundCancel", "POST /drop/sessions/{sessionId}/rounds/{roundId}/cancel", "Player")]
+routes += [("DistanceRanking", "GET /ranking/distance", "Player"), ("PlayerActivityFeed", "GET /players/me/activity", "Player")]
 routes += [("BonusGet", "GET /bonuses", "Player"), ("BonusEnsure", "POST /bonuses/ensure", "Player"),
            ("BonusAnnounce", "POST /bonuses/announce", "Player"), ("BonusFinish", "POST /bonuses/finish", "Player"),
            ("JackpotSpin", "POST /bonuses/jackpot/spins", "Player"), ("JackpotAck", "POST /bonuses/jackpot/{operationId}/ack", "Player"),

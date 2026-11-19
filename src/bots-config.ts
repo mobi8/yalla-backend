@@ -8,6 +8,7 @@ const bps = z.number().int().min(0).max(10000);
 const walletRaidSchema = z.strictObject({
   enabled: z.boolean(),
   protectedBalanceBps: bps,
+  minimumTargetYP: z.number().int().min(0).max(2147483647).optional(),
   bagWeightsBps: z.tuple([bps.positive(), bps.positive(), bps.positive(), z.literal(0), z.literal(0)]).optional(),
 }).refine(raid => (!raid.enabled || raid.bagWeightsBps !== undefined) &&
   (raid.bagWeightsBps?.reduce((sum, weight) => sum + weight, 0) ?? 0) <= 10000 - raid.protectedBalanceBps);

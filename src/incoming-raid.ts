@@ -9,6 +9,7 @@ import { buildingIds } from './world-config.js';
 import { regenerateRaidBots } from './raid-bots.js';
 import { decodeProgress, decodeWallet, encodeProgress, encodeWallet, playerKey, playerNumberOptions } from './repository.js';
 
+import { journeyReadKeys } from './journey-read-keys.js';
 import { startWalletRaid, walletRaidDebit, WALLET_RAID_PREFIX } from './incoming-wallet-raid.js';
 
 const MINUTE=60000, DAY=86400000, SHARDS=16;
@@ -76,6 +77,7 @@ export class IncomingRaidService {
       for await (const player of this.store.offline(oldest, latest)) {
         if (await this.execute(player, config, slot, action)) return;
       }
+      if (policy && action === 'RAID') console.info(JSON.stringify({event:'INCOMING_WALLET_RAID_SKIPPED',slot}));
       return;
     }
     if(config.incomingRaid.allowedPlayerIds.length) {
@@ -153,7 +155,9 @@ export class IncomingRaidService {
             const stored = await this.store.get(player, 'WALLET');
             if (!stored) return;
             const wallet = decodeWallet(stored);
-            const {protectedBalanceBps, bagWeightsBps} = raidConfig!;
+            const {protectedBalanceBps, bagWeightsBps, minimumTargetYP = 0} = raidConfig!;
+            // A rejected wallet version retries this read and eligibility check before any settlement.
+            if (wallet.yallaPoint < minimumTargetYP) return;
             raidPlan ??= startWalletRaid(wallet.yallaPoint, bagWeightsBps!);
             const stolenYP = walletRaidDebit(raidPlan.selectedYP, wallet.yallaPoint, protectedBalanceBps);
             const balanceAfter = wallet.yallaPoint - stolenYP;
@@ -270,7 +274,7 @@ export class DynamoIncomingStore implements IncomingStore {
   async commit(player:string,writes:IncomingWrite[],guard?: RaidGuard) {
     await this.client.send(new TransactWriteCommand({TransactItems:[
       ...writes.map(w=>({Put:{TableName:this.table,Item:{...playerKey(player,w.sk),...(w.sk === 'PROGRESS' ? encodeProgress(decodeProgress(w.value)) :
-          w.sk === 'WALLET' ? encodeWallet(decodeWallet(w.value)) : w.value)},
+          w.sk === 'WALLET' ? encodeWallet(decodeWallet(w.value)) : w.value), ...journeyReadKeys(player,w.sk,w.value)},
         ConditionExpression:w.expectedVersion===undefined?'attribute_not_exists(PK)':'#v = :v',
         ...(w.expectedVersion===undefined?{}:{ExpressionAttributeNames:{'#v':'version'},ExpressionAttributeValues:{':v':w.expectedVersion}})}})),
       ...(guard ? [{ConditionCheck: {TableName: this.table, Key: playerKey(player, ACTIVITY_KEY),
