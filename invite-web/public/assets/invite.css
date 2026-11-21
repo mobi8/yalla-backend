@@ -1,0 +1,61 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, sans-serif;
+  color: #fff7db;
+  background: #172235;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+.hero {
+  min-height: 100svh;
+  display: grid;
+  align-items: center;
+  padding: clamp(1.5rem, 9vw, 8rem);
+  background:
+    linear-gradient(90deg, #19172c 3%, #1e1b31f2 34%, #251f3566 63%, transparent 90%),
+    url('/assets/oasis.jpg') right 47% / min(76vw, 66rem) auto no-repeat,
+    #172235;
+}
+.invite { max-width: 31rem; animation: entrance 450ms ease-out both; }
+.logo { display: block; width: clamp(10rem, 42vw, 19rem); height: auto; margin: 0 0 1.5rem; }
+h1 { font: 700 clamp(2.6rem, 6vw, 5.1rem)/.96 Georgia, serif; letter-spacing: -.045em; margin: 0 0 1.1rem; overflow-wrap: anywhere; }
+p { font-size: 1rem; line-height: 1.5; max-width: 33ch; }
+.code-label { font-weight: 700; margin: 1.6rem 0 .4rem; }
+.code-line { display: flex; flex-wrap: wrap; align-items: center; gap: .7rem; }
+code { color: #ffdc7c; font-size: clamp(1.15rem, 5vw, 1.7rem); font-weight: 700; letter-spacing: .04em; }
+button, .store {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.75rem;
+  padding: .6rem .9rem;
+  border: 1px solid #ffda82;
+  border-radius: .55rem;
+  color: inherit;
+  background: transparent;
+  font: 700 .94rem system-ui, sans-serif;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color 150ms, color 150ms;
+}
+button:hover { background-color: #fff7db; color: #321a13; }
+.store { margin-top: .5rem; background: #ffd165; color: #321a13; }
+.store:hover { background: #ffebac; }
+:focus-visible { outline: 2px solid white; outline-offset: 4px; }
+#copy-status { margin: .3rem 0 0; min-height: 1.5em; }
+.instructions, .notice { color: #f1dcbf; }
+@keyframes entrance { from { opacity: 0; transform: translateY(.55rem); } }
+@media (max-width: 650px) {
+  .hero {
+    align-items: end;
+    padding-top: clamp(7rem, 26svh, 14rem);
+    background:
+      linear-gradient(0deg, #211b30 5%, #211b30ef 50%, #211b3033 100%),
+      url('/assets/oasis.jpg') center 49% / cover no-repeat;
+  }
+  .logo { margin-bottom: .8rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .invite { animation: none; }
+  button, .store { transition: none; }
+}

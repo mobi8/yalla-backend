@@ -1,0 +1,12 @@
+{
+  "framework": null,
+  "rewrites": [
+    { "source": "/f/:code", "destination": "/api/invite?code=:code" }
+  ],
+  "headers": [
+    {
+      "source": "/.well-known/apple-app-site-association",
+      "headers": [{ "key": "Content-Type", "value": "application/json" }]
+    }
+  ]
+}

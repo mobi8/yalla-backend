@@ -154,6 +154,27 @@ for name, route, prefix in routes:
     if prefix == "Player":
         properties.update({"AuthorizationType": "JWT", "AuthorizerId": ref("JwtAuthorizer"), "AuthorizationScopes": ["aws.cognito.signin.user.admin"]})
     resources[name + "Route"] = {"Type": "AWS::ApiGatewayV2::Route", "Properties": properties}
+# Friends share the PlayerTable and are exposed through the DEV API.
+for name, route in (
+    ("Code", "GET /friends/code"), ("Search", "GET /friends/search"),
+    ("Incoming", "GET /friends/requests/incoming"), ("Outgoing", "GET /friends/requests/outgoing"),
+    ("List", "GET /friends/list"), ("Count", "GET /friends/count"),
+    ("Suggested", "GET /friends/suggested"), ("Rank", "GET /friends/rank"),
+    ("Request", "POST /friends/requests"), ("Action", "POST /friends/actions"),
+    ("Invite", "GET /invites/{code}"),
+):
+    properties = {"ApiId": ref("Api"), "RouteKey": route, "Target": sub("integrations/${PlayerIntegration}"), "AuthorizationType": "NONE"}
+    if name != "Invite":
+        properties.update({"AuthorizationType": "JWT", "AuthorizerId": ref("JwtAuthorizer"),
+                           "AuthorizationScopes": ["aws.cognito.signin.user.admin"]})
+    resources["Friends" + name + "Route"] = {"Type": "AWS::ApiGatewayV2::Route", "Condition": "IsDev", "Properties": properties}
+resources["PlayerRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"].append({
+    "Effect": "Allow", "Action": "dynamodb:DeleteItem", "Resource": arn("PlayerTable"),
+    "Condition": {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["PLAYER#*"]},
+                  "StringEquals": {"dynamodb:EnclosingOperation": "TransactWriteItems"}},
+})
+resources["PlayerFunction"]["Properties"]["Environment"]["Variables"]["FRIENDS_BOT_AUTO_ACCEPT"] = {
+    "Fn::If": ["IsDev", "true", "false"]}
 parameters["NotificationArtifactKey"] = {"Type": "String", "Default": ""}
 notification_artifact = {"Fn::If": ["HasNotificationArtifact", ref("NotificationArtifactKey"), ref("ArtifactKey")]}
 resources["PlayerFunction"]["Properties"]["Code"]["S3Key"] = notification_artifact
@@ -190,9 +211,12 @@ for kind, handler, statements, env in [
       {"Effect":"Allow","Action":["dynamodb:DescribeStream","dynamodb:GetRecords","dynamodb:GetShardIterator","dynamodb:ListStreams"],
        "Resource":{"Fn::GetAtt":["PlayerTable","StreamArn"]}},
       {"Effect":"Allow","Action":["sqs:SendMessage"],"Resource":arn("NotificationQueue")},
+      {"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:Query"],"Resource":arn("PlayerTable"),
+       "Condition":{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["PLAYER#*"]}}},
       {"Effect":"Allow","Action":["s3:GetObject"],"Resource":"arn:aws:s3:::yalla-result-pools-533266967583/game-config/dev/v1/world-buildings.json"},
     ], {"PUSH_QUEUE_URL":ref("NotificationQueue"),"GAME_CONFIG_BUCKET":"yalla-result-pools-533266967583",
-        "ENVIRONMENT":"dev"}),
+        "ENVIRONMENT":"dev","PLAYER_TABLE":ref("PlayerTable"),
+        "RANKING_PERIOD_DAYS":resources["PlayerFunction"]["Properties"]["Environment"]["Variables"]["RANKING_PERIOD_DAYS"]}),
     ("Worker", "notification-worker", [
       {"Effect":"Allow","Action":["sqs:ReceiveMessage","sqs:DeleteMessage","sqs:GetQueueAttributes"],"Resource":arn("NotificationQueue")},
       {"Effect":"Allow","Action":["dynamodb:Query","dynamodb:GetItem","dynamodb:UpdateItem"],"Resource":arn("PlayerTable"),
@@ -222,6 +246,8 @@ notification_resource("NotificationStreamMapping","AWS::Lambda::EventSourceMappi
     "FilterCriteria":{"Filters":[
       {"Pattern":json.dumps({"dynamodb":{"Keys":{"SK":{"S":[
          {"prefix":"INCOMING#RECEIPT#"},{"prefix":"INCOMING#WALLET_RAID#"}]}}}},separators=(",",":"))},
+      {"Pattern":json.dumps({"eventName":["MODIFY"],"dynamodb":{"Keys":{"SK":{"S":[{"prefix":"ROUND#"}]}},
+        "NewImage":{"status":{"S":["SETTLED"]},"rankDistance":{"S":[{"exists":True}]}}}},separators=(",",":"))},
     ]}})
 resources["NotificationRouterRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"].append(
     {"Effect":"Allow","Action":"sqs:SendMessage","Resource":arn("NotificationDLQ")})

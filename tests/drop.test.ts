@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { parseConfig, type ConfigSource, type ConfigName } from '../src/game-config.js';
 import { describe, it, expect } from 'vitest';
 import { DropService, type DropStore, type Write, type Session } from '../src/drop.js';
@@ -140,7 +142,72 @@ describe('drop transaction lifecycle', () => {
     fail = true;
     const result = { requestId: input().requestId, actual, physicsVersion: assigned.physicsVersion };
     await expect(f.service.submit(principal, sid, r.round!.roundId, result)).rejects.toMatchObject({ name: 'TimeoutError' });
-    expect((await f.service.submit(principal, sid, r.round!.roundId, result)).save.wallet.yallaPoint).toBe(30);
+    const recovered = await f.service.round(principal, sid, r.round!.roundId);
+    expect(recovered.round.status).toBe('SETTLED');
+    expect(recovered.round.actual).toEqual(actual);
+    expect(recovered.save.wallet.energy).toBe(47);
+    expect(recovered.save.wallet.yallaPoint).toBe(30);
+    expect(recovered.save.progress.distance).toBe('15');
+    expect([...f.items.keys()].filter(k => k.startsWith('ECONOMY#CAUSE#settle:'))).toHaveLength(1);
+  });
+  it('leaves an uncommitted settlement issued and accepts the original result once after recovery', async () => {
+    const f = fixture(), sid = (await f.service.open(principal)).session!.sessionId;
+    const rid = (await f.service.begin(principal, sid, input())).round!.roundId;
+    const result = { requestId: input().requestId, actual, physicsVersion: assigned.physicsVersion };
+    const commit = f.db.commit;
+    f.db.commit = async () => { throw Object.assign(new Error(), { name: 'TimeoutError' }); };
+    await expect(f.service.submit(principal, sid, rid, result)).rejects.toMatchObject({ name: 'TimeoutError' });
+    f.db.commit = commit;
+    const pending = await f.service.round(principal, sid, rid);
+    expect(pending.round.status).toBe('ISSUED');
+    expect(pending.save.wallet.energy).toBe(47);
+    expect(pending.save.progress.distance).toBe('0');
+    const settled = await f.service.submit(principal, sid, rid, result);
+    const repeated = await f.service.submit(principal, sid, rid, result);
+    expect(repeated.round).toEqual(settled.round);
+    expect(repeated.save.wallet.energy).toBe(47);
+    expect(repeated.save.progress.distance).toBe('15');
+    expect([...f.items.keys()].filter(k => k.startsWith('ECONOMY#CAUSE#settle:'))).toHaveLength(1);
+  });
+  it.runIf(process.env.YALLA_TEST_LOOPBACK === '1')('recovers settlement after the HTTP response socket is cut', async () => {
+    const f = fixture(), sid = (await f.service.open(principal)).session!.sessionId;
+    const rid = (await f.service.begin(principal, sid, input())).round!.roundId;
+    const result = { requestId: input().requestId, actual, physicsVersion: assigned.physicsVersion };
+    let posts = 0;
+    const server = createServer(async (request, response) => {
+      try {
+        if (request.method === 'POST') {
+          posts++;
+          await f.service.submit(principal, sid, rid, result);
+          request.socket.destroy();
+          return;
+        }
+        const snapshot = await f.service.round(principal, sid, rid);
+        response.setHeader('Content-Type', 'application/json');
+        response.end(JSON.stringify(snapshot));
+      } catch {
+        response.statusCode = 500;
+        response.end();
+      }
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Loopback server has no port');
+      const url = `http://127.0.0.1:${address.port}/drop/sessions/${sid}/rounds/${rid}`;
+      await expect(fetch(url, { method: 'POST' })).rejects.toThrow();
+      const recovery = await fetch(url);
+      expect(recovery.status).toBe(200);
+      expect(await recovery.json()).toMatchObject({
+        round: { status: 'SETTLED', actual },
+        save: { wallet: { energy: 47 }, progress: { distance: '15' } },
+      });
+      expect(posts).toBe(1);
+      expect([...f.items.keys()].filter(k => k.startsWith('ECONOMY#CAUSE#settle:'))).toHaveLength(1);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
   });
   it('does not mutate settlement state on economy overflow', async () => {
     const f = fixture(), sid = (await f.service.open(principal)).session!.sessionId;

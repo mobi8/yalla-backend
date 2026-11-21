@@ -127,6 +127,14 @@ export class JourneyReadService {
     return scores;
   }
 
+  async currentPeriodDistances(players: string[]) {
+    const period = rankingPeriod(this.clock(), this.days);
+    const selected = new Set(players);
+    const scores = await this.periodScores(period);
+    return { period, distances: new Map(scores.filter(score => selected.has(score.player))
+      .map(score => [score.player, score.distance])) };
+  }
+
   async ranking(principal: Principal, query: RankingQuery) {
     const player = await this.owner(principal);
     const current = rankingPeriod(this.clock(), this.days);

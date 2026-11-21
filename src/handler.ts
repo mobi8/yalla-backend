@@ -1,3 +1,6 @@
+import { BotsConfigs } from './bots-config.js';
+import { FriendsService } from './friends.js';
+import { DynamoFriendsStore } from './friends-store.js';
 import { NotificationDevices, deviceInput } from './notification-devices.js';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
@@ -35,7 +38,7 @@ function body(event: HttpEvent): unknown {
   try { return JSON.parse(event.body ? (event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body) : '{}'); }
   catch { throw new ApiError(400, 'INVALID_JSON'); }
 }
-export function createHandler(service: PlayerService, authenticate: Authenticate = cognitoContext, identity?: GuestIdentity, drops?: DropService, bonuses?: BonusService, worlds?: WorldService, recordActivity?: (principal: Principal) => Promise<void>, journey?: JourneyReadService, devices?: NotificationDevices) {
+export function createHandler(service: PlayerService, authenticate: Authenticate = cognitoContext, identity?: GuestIdentity, drops?: DropService, bonuses?: BonusService, worlds?: WorldService, recordActivity?: (principal: Principal) => Promise<void>, journey?: JourneyReadService, devices?: NotificationDevices, friends?: FriendsService) {
   return async (event: HttpEvent) => {
     const response = (statusCode: number, data: unknown) => ({ statusCode,
       headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }, body: JSON.stringify(data) });
@@ -60,6 +63,14 @@ export function createHandler(service: PlayerService, authenticate: Authenticate
         if (route.endsWith('/refresh')) return response(200, { tokens: await identity.refresh(input.data.refreshToken) });
         await identity.revoke(input.data.refreshToken);
         return response(200, { revoked: true });
+      }
+      if (event.rawPath.startsWith('/friends/') || event.rawPath.startsWith('/invites/')) {
+        if (!friends) throw new ApiError(503, 'FRIENDS_NOT_CONFIGURED');
+        if (route.startsWith('GET /invites/'))
+          return response(200, await friends.invite(event.rawPath.slice('/invites/'.length)));
+        if (event.rawPath.startsWith('/friends/'))
+          return response(200, await friends.route(await authenticate(event), route, event.queryStringParameters ?? {}, () => body(event)));
+        throw new ApiError(404, 'ROUTE_NOT_FOUND');
       }
       if (route === 'POST /players/me/devices' || route.startsWith('DELETE /players/me/devices/')) {
         const principal = await authenticate(event);
@@ -192,15 +203,20 @@ export async function handler(event: HttpEvent | z.infer<typeof opsNicknameReque
     const configs = new GameConfigs();
     const drops = createDropService(process.env.PLAYER_TABLE, configs);
     const players = createDynamoRepository(process.env.PLAYER_TABLE);
-    const activity = new PlayerActivity(DynamoDBDocumentClient.from(new DynamoDBClient({})), process.env.PLAYER_TABLE);
+    const table = process.env.PLAYER_TABLE;
+    const client = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+    const activity = new PlayerActivity(client, table);
+    const journey = createJourneyReadService(table, players);
+    const friends = new FriendsService(new DynamoFriendsStore(client, table), players, journey, new BotsConfigs(),
+      process.env.ENVIRONMENT === 'dev' && process.env.FRIENDS_BOT_AUTO_ACCEPT === 'true');
     configured = createHandler(new PlayerService(players), cognitoContext,
     new CognitoGuestIdentity(new CognitoIdentityProviderClient({ region: process.env.AWS_REGION ?? 'ap-south-1' }),
       process.env.USER_POOL_ID, process.env.USER_POOL_CLIENT_ID), drops, createBonusService(process.env.PLAYER_TABLE, drops, configs),createWorldService(process.env.PLAYER_TABLE,drops,configs), async principal => {
       const playerId = await players.find(principal);
       if (!playerId) throw new ApiError(404, 'PLAYER_NOT_FOUND');
       await activity.record(playerId);
-    }, createJourneyReadService(process.env.PLAYER_TABLE, players), process.env.ENVIRONMENT === 'dev'
-      ? new NotificationDevices(DynamoDBDocumentClient.from(new DynamoDBClient({})),process.env.PLAYER_TABLE,players) : undefined);
+    }, journey, process.env.ENVIRONMENT === 'dev'
+      ? new NotificationDevices(client,table,players) : undefined, friends);
   }
   return configured(event);
 }

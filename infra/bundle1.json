@@ -773,6 +773,26 @@
                       "Fn::Sub": "arn:aws:s3:::yalla-result-pools-533266967583/game-config/${Environment}/v1/*"
                     }
                   ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "dynamodb:DeleteItem",
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "PlayerTable",
+                      "Arn"
+                    ]
+                  },
+                  "Condition": {
+                    "ForAllValues:StringLike": {
+                      "dynamodb:LeadingKeys": [
+                        "PLAYER#*"
+                      ]
+                    },
+                    "StringEquals": {
+                      "dynamodb:EnclosingOperation": "TransactWriteItems"
+                    }
+                  }
                 }
               ]
             }
@@ -855,6 +875,13 @@
             "PHYSICS_VERSION": "fixed-fresh-round-v1",
             "COGNITO_ISSUER": {
               "Fn::Sub": "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+            },
+            "FRIENDS_BOT_AUTO_ACCEPT": {
+              "Fn::If": [
+                "IsDev",
+                "true",
+                "false"
+              ]
             }
           }
         }
@@ -1819,6 +1846,220 @@
         ]
       }
     },
+    "FriendsCodeRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /friends/code",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsSearchRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /friends/search",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsIncomingRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /friends/requests/incoming",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsOutgoingRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /friends/requests/outgoing",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsListRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /friends/list",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsCountRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /friends/count",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsSuggestedRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /friends/suggested",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsRankRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /friends/rank",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsRequestRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /friends/requests",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsActionRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /friends/actions",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsInviteRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /invites/{code}",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "NONE"
+      }
+    },
     "NotificationDeviceRegister": {
       "Type": "AWS::ApiGatewayV2::Route",
       "Condition": "IsDev",
@@ -2036,6 +2277,26 @@
                 {
                   "Effect": "Allow",
                   "Action": [
+                    "dynamodb:GetItem",
+                    "dynamodb:Query"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "PlayerTable",
+                      "Arn"
+                    ]
+                  },
+                  "Condition": {
+                    "ForAllValues:StringLike": {
+                      "dynamodb:LeadingKeys": [
+                        "PLAYER#*"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
                     "s3:GetObject"
                   ],
                   "Resource": "arn:aws:s3:::yalla-result-pools-533266967583/game-config/dev/v1/world-buildings.json"
@@ -2102,12 +2363,24 @@
         },
         "Environment": {
           "Variables": {
-            "NOTIFICATION_CONFIG": "{\"remoteEnabled\":false,\"apns\":{\"environment\":\"sandbox\",\"bundleId\":\"com.mobi8.yallaball\",\"teamId\":\"\",\"keyId\":\"\"},\"events\":{\"RAID_STOLEN\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your coins were stolen!\",\"body\":\"{actor} stole {amount} YP from you!\"},\"ATTACK_HIT\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your village was attacked!\",\"body\":\"{actor} damaged your {building}!\",\"fallback\":\"{actor} attacked your village!\"},\"ATTACK_BLOCKED\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your shield saved you!\",\"body\":\"Your shield blocked {actor}'s attack!\"},\"ENERGY_FULL\":{\"activity\":false,\"telegram\":false,\"push\":\"LOCAL\",\"pushCooldownSeconds\":0,\"title\":\"Your energy is full!\",\"body\":\"50/50 Energy! Ready to play?\"}}}",
+            "NOTIFICATION_CONFIG": "{\"remoteEnabled\":false,\"apns\":{\"environment\":\"sandbox\",\"bundleId\":\"com.mobi8.yallaball\",\"teamId\":\"\",\"keyId\":\"\"},\"events\":{\"RAID_STOLEN\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your coins were stolen!\",\"body\":\"{actor} stole {amount} YP from you!\"},\"ATTACK_HIT\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your village was attacked!\",\"body\":\"{actor} damaged your {building}!\",\"fallback\":\"{actor} attacked your village!\"},\"ATTACK_BLOCKED\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your shield saved you!\",\"body\":\"Your shield blocked {actor}'s attack!\"},\"RANK_OVERTAKEN\":{\"activity\":false,\"telegram\":false,\"push\":true,\"pushCooldownSeconds\":3600,\"title\":\"You've been overtaken!\",\"body\":\"{actor} passed you! You're now #{rank}.\"},\"ENERGY_FULL\":{\"activity\":false,\"telegram\":false,\"push\":\"LOCAL\",\"pushCooldownSeconds\":0,\"title\":\"Your energy is full!\",\"body\":\"50/50 Energy! Ready to play?\"}}}",
             "PUSH_QUEUE_URL": {
               "Ref": "NotificationQueue"
             },
             "GAME_CONFIG_BUCKET": "yalla-result-pools-533266967583",
-            "ENVIRONMENT": "dev"
+            "ENVIRONMENT": "dev",
+            "PLAYER_TABLE": {
+              "Ref": "PlayerTable"
+            },
+            "RANKING_PERIOD_DAYS": {
+              "Fn::If": [
+                "HasNotificationArtifact",
+                "7",
+                {
+                  "Ref": "RankingPeriodDays"
+                }
+              ]
+            }
           }
         }
       }
@@ -2269,7 +2542,7 @@
         },
         "Environment": {
           "Variables": {
-            "NOTIFICATION_CONFIG": "{\"remoteEnabled\":false,\"apns\":{\"environment\":\"sandbox\",\"bundleId\":\"com.mobi8.yallaball\",\"teamId\":\"\",\"keyId\":\"\"},\"events\":{\"RAID_STOLEN\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your coins were stolen!\",\"body\":\"{actor} stole {amount} YP from you!\"},\"ATTACK_HIT\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your village was attacked!\",\"body\":\"{actor} damaged your {building}!\",\"fallback\":\"{actor} attacked your village!\"},\"ATTACK_BLOCKED\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your shield saved you!\",\"body\":\"Your shield blocked {actor}'s attack!\"},\"ENERGY_FULL\":{\"activity\":false,\"telegram\":false,\"push\":\"LOCAL\",\"pushCooldownSeconds\":0,\"title\":\"Your energy is full!\",\"body\":\"50/50 Energy! Ready to play?\"}}}",
+            "NOTIFICATION_CONFIG": "{\"remoteEnabled\":false,\"apns\":{\"environment\":\"sandbox\",\"bundleId\":\"com.mobi8.yallaball\",\"teamId\":\"\",\"keyId\":\"\"},\"events\":{\"RAID_STOLEN\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your coins were stolen!\",\"body\":\"{actor} stole {amount} YP from you!\"},\"ATTACK_HIT\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your village was attacked!\",\"body\":\"{actor} damaged your {building}!\",\"fallback\":\"{actor} attacked your village!\"},\"ATTACK_BLOCKED\":{\"activity\":true,\"telegram\":true,\"push\":true,\"pushCooldownSeconds\":0,\"title\":\"Your shield saved you!\",\"body\":\"Your shield blocked {actor}'s attack!\"},\"RANK_OVERTAKEN\":{\"activity\":false,\"telegram\":false,\"push\":true,\"pushCooldownSeconds\":3600,\"title\":\"You've been overtaken!\",\"body\":\"{actor} passed you! You're now #{rank}.\"},\"ENERGY_FULL\":{\"activity\":false,\"telegram\":false,\"push\":\"LOCAL\",\"pushCooldownSeconds\":0,\"title\":\"Your energy is full!\",\"body\":\"50/50 Energy! Ready to play?\"}}}",
             "APNS_PARAMETER": "/yalla/dev/notifications/apns-private-key",
             "PLAYER_TABLE": {
               "Ref": "PlayerTable"
@@ -2315,6 +2588,9 @@
           "Filters": [
             {
               "Pattern": "{\"dynamodb\":{\"Keys\":{\"SK\":{\"S\":[{\"prefix\":\"INCOMING#RECEIPT#\"},{\"prefix\":\"INCOMING#WALLET_RAID#\"}]}}}}"
+            },
+            {
+              "Pattern": "{\"eventName\":[\"MODIFY\"],\"dynamodb\":{\"Keys\":{\"SK\":{\"S\":[{\"prefix\":\"ROUND#\"}]}},\"NewImage\":{\"status\":{\"S\":[\"SETTLED\"]},\"rankDistance\":{\"S\":[{\"exists\":true}]}}}}"
             }
           ]
         }
