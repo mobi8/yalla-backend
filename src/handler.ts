@@ -1,3 +1,4 @@
+import { FriendHelpService } from './friend-help.js';
 import { BotsConfigs } from './bots-config.js';
 import { FriendsService } from './friends.js';
 import { DynamoFriendsStore } from './friends-store.js';
@@ -11,7 +12,7 @@ import { GameConfigs } from './game-config.js';
 import { createBonusService, bonusInput, kindInput, raidBeginInput, attackInput, pickInput, costumePurchaseInput, costumeEquipInput, type BonusService } from './bonus.js';
 import { createDropService, beginSchema, resultSchema, cancelSchema, type DropService } from './drop.js';
 import type { Principal } from './model.js';
-import { ApiError, createDynamoRepository } from './repository.js';
+import { ApiError, createDynamoRepository, playerNumberOptions } from './repository.js';
 import { activityQuery, createJourneyReadService, rankingQuery, type JourneyReadService } from './journey-read.js';
 import { PlayerService } from './service.js';
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
@@ -207,8 +208,10 @@ export async function handler(event: HttpEvent | z.infer<typeof opsNicknameReque
     const client = DynamoDBDocumentClient.from(new DynamoDBClient({}));
     const activity = new PlayerActivity(client, table);
     const journey = createJourneyReadService(table, players);
-    const friends = new FriendsService(new DynamoFriendsStore(client, table), players, journey, new BotsConfigs(),
-      process.env.ENVIRONMENT === 'dev' && process.env.FRIENDS_BOT_AUTO_ACCEPT === 'true');
+    const friendsClient = DynamoDBDocumentClient.from(new DynamoDBClient({}), { unmarshallOptions: playerNumberOptions });
+    const friendsStore = new DynamoFriendsStore(friendsClient, table);
+    const friends = new FriendsService(friendsStore, players, journey, new BotsConfigs(), undefined, undefined,
+      new FriendHelpService(friendsStore, configs));
     configured = createHandler(new PlayerService(players), cognitoContext,
     new CognitoGuestIdentity(new CognitoIdentityProviderClient({ region: process.env.AWS_REGION ?? 'ap-south-1' }),
       process.env.USER_POOL_ID, process.env.USER_POOL_CLIENT_ID), drops, createBonusService(process.env.PLAYER_TABLE, drops, configs),createWorldService(process.env.PLAYER_TABLE,drops,configs), async principal => {

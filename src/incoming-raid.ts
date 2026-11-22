@@ -207,6 +207,7 @@ export class IncomingRaidService {
               writes.push({sk:'PROGRESS',expectedVersion:progress.version,value:{...progress,facilityLevels,
                 version:progress.version+1,updatedAt:iso,
                 villageDamage:{worldRunId:progress.worldRunId,village:progress.village,buildings:{...damage,[buildingId]:attackId},
+                  ...(Object.keys(damage).length && progress.villageDamage?.help ? {help: progress.villageDamage.help} : {}),
                   ...(policy ? {levelsBefore:{...levelsBefore,[buildingId]:levelBefore}} : {})}}});
               if (policy) {
                 const sk = `WORLD#${progress.worldId}`;

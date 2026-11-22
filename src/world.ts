@@ -9,7 +9,7 @@ import { DynamoDropStore } from './drop.js';
 import { ApiError,type PlayerRepository } from './repository.js';
 import { type DropStore,type Write,DropService,type Session } from './drop.js';
 import { type ConfigSource } from './game-config.js';
-import { loadWorldCatalog,buildingIds,type WorldCatalog } from './world-config.js';
+import { loadWorldCatalog,villageRepairCost,buildingIds,type WorldCatalog } from './world-config.js';
 import { worldIds } from './world-ids.js';
 import { currentVillageDamage,progressSchema,walletSchema,type Principal,type Save } from './model.js';
 type Item=Record<string,any>;
@@ -17,8 +17,6 @@ export const worldCommand=z.strictObject({requestId:z.string().uuid(),worldId:z.
 export const upgradeCommand=worldCommand.extend({buildingId:z.enum(buildingIds),expectedLevel:z.number().int().min(1).max(5)});
 export const repairCommand=worldCommand.extend({buildingId:z.enum(buildingIds),attackId:z.string().regex(/^\d{1,16}$/)});
 type WorldAction='upgrade'|'repair'|'complete'|'select';
-const repairPrice=(building:WorldCatalog['worlds'][number]['buildings'][number],level:number)=>
- Math.ceil(building.levels[Math.max(0,level-2)]!.upgradeCost!/2);
 const hash=(v:unknown)=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const meta=(now:string,version=1)=>({schemaVersion:1,version,updatedAt:now});
 export class WorldService {
@@ -55,7 +53,7 @@ export class WorldService {
    const damage=currentVillageDamage(p);
    const repairs=definition.buildings.flatMap(building=>{
     const attackId=damage[building.id];
-    return attackId?[{buildingId:building.id,attackId,cost:repairPrice(building,p.villageDamage?.levelsBefore?.[building.id] ?? p.facilityLevels[buildingIds.indexOf(building.id)]!)}]:[];
+    return attackId?[{buildingId:building.id,attackId,cost:villageRepairCost(p,building)}]:[];
    });
    return {...drop,worldState:{...current.value,levels:current.value.levels,worldRunId:p.worldRunId,village:p.village,repairs},unlockedWorldIds:unlocks.value.worldIds,
     currentWorld:definition,catalog:{...catalog,worlds:catalog.worlds.map(({buildings,...w})=>w)}};
@@ -94,7 +92,7 @@ export class WorldService {
    this.checkCurrent(p,input.worldId);
    if(currentVillageDamage(p)[input.buildingId as typeof buildingIds[number]]!==input.attackId)throw new ApiError(409,'BUILDING_DAMAGE_CHANGED');
    const building=w.buildings.find(b=>b.id===input.buildingId)!;
-   cost=repairPrice(building,p.villageDamage?.levelsBefore?.[building.id] ?? p.facilityLevels[buildingIds.indexOf(building.id)]!);
+   cost=villageRepairCost(p,building);
    if(ctx.save.wallet.yallaPoint<cost)throw new ApiError(409,'INSUFFICIENT_YALLA_POINT');
   }else if(type==='complete'){
    this.checkCurrent(p,input.worldId);
@@ -151,8 +149,10 @@ export class WorldService {
     const command=input as z.infer<typeof repairCommand>;
     const damage=currentVillageDamage(p);
     if(damage[command.buildingId]!==command.attackId)throw new ApiError(409,'BUILDING_DAMAGE_CHANGED');
-    if(w.yallaPoint<intent.cost)throw new ApiError(409,'INSUFFICIENT_YALLA_POINT');
-    w.yallaPoint-=intent.cost;
+    const building = def.buildings.find(b => b.id === command.buildingId)!;
+    const cost = Math.min(intent.cost, villageRepairCost(p, building));
+    if(w.yallaPoint<cost)throw new ApiError(409,'INSUFFICIENT_YALLA_POINT');
+    w.yallaPoint-=cost;
     const levelBefore = p.villageDamage?.levelsBefore?.[command.buildingId];
     if (levelBefore !== undefined) {
      const index = buildingIds.indexOf(command.buildingId);
@@ -163,8 +163,9 @@ export class WorldService {
       levels:[...p.facilityLevels]},expectedVersion:current.stored?.version});
     }
     delete damage[command.buildingId];
+    if (p.villageDamage?.help) delete p.villageDamage.help[command.buildingId];
     if(!Object.keys(damage).length)delete p.villageDamage;
-    result={...result,worldRunId:p.worldRunId,village:p.village,buildingId:command.buildingId,attackId:command.attackId,cost:intent.cost};
+    result={...result,worldRunId:p.worldRunId,village:p.village,buildingId:command.buildingId,attackId:command.attackId,cost};
    }else if(type==='complete'){
     this.checkCurrent(p,input.worldId);
     this.checkUndamaged(p);

@@ -21,7 +21,7 @@ Friends uses `PlayerTable` in Mumbai DEV and the existing partition and sort key
 | `PLAYER#<sender>` | `FRIENDS#SENT#<operation UUID>` | Send idempotency receipt. The relationship UUID is generated separately by the server. |
 | `PLAYER#<invitee>` | `FRIENDS#REFERRAL` | First valid attribution, including inviter, invitee, code, timestamp, status and reward status. |
 
-Conditional DynamoDB writes keep projections and pair state in sync. The API resolves the owner through the existing Cognito Player ID mapping. The DEV recommendations use the existing ten configured bots, ordered by config, and exclude any bot with prior pair history. Bot auto-accept uses the DEV flag. A referral is recorded once if the player confirms an invite request within 24 hours of new account creation. Existing migrated players and self-invites are ineligible. The referral record has reward status `NOT_AWARDED`.
+Conditional DynamoDB writes keep projections and pair state in sync. The API resolves the owner through the existing Cognito Player ID mapping. Recommendations show up to ten real players from the first 50 current-period scores, excluding the caller, pending pairs and accepted friends. New requests start pending. Existing accepted bot relationships remain in friend rankings. A referral is recorded once if the player confirms an invite request within 24 hours of new account creation. Existing migrated players and self-invites are ineligible. The referral record has reward status `NOT_AWARDED`.
 
 ## HTTP API
 
@@ -37,9 +37,14 @@ All Friends routes require a Cognito access token. List routes accept optional `
 | `POST /friends/actions` | Apply `accept`, `decline`, `cancel` or `remove` using `{code, requestId, action}`. Use the server request UUID from the list. |
 | `GET /friends/list` | List accepted friends. |
 | `GET /friends/count` | Get the current incoming request count. |
-| `GET /friends/suggested` | List configured DEV bots available to add. |
+| `GET /friends/suggested` | List eligible players from the current-period ranking. |
+| `GET /friends/help` | List accepted human friends with helpable damage on their current Village, including the count of buildings eligible for HELP. Follow `nextCursor` even when a page has no matching entries. |
 | `GET /friends/rank` | Get this player's weekly ranking, including every accepted friend. |
 | `GET /invites/{code}` | Public lookup, returning only the code and inviter nickname. |
+
+## Village HELP
+
+A damaged building with a positive repair cost can receive HELP once per damage cycle, regardless of the age of the attack. HELP reduces the YP repair cost by 1–30% and costs one Clover. The discount and usage marker stay on the damaged building through subsequent attacks. A completed owner repair clears the marker, and a new attack after that repair starts a new cycle. The list, visit view and HELP command use the current Village damage state. Activity records retain the time the help or thanks occurred.
 
 ## Ranking and notifications
 
@@ -47,7 +52,7 @@ The Friends ranking reads the existing period score function, which sums settled
 
 The DEV Notification Hub observes changes to settled rounds. The router compares cumulative scores immediately before and after the settlement, within the same weekly window. It verifies that the relationship predates the round and still exists for both players, excludes ties and emits `RANK_OVERTAKEN` with Friends scope. The queue carries a stable event ID derived from the period, settling round and recipient. The existing delivery worker enforces a one-hour per-recipient cooldown and per-device delivery deduplication. The stream runs independently of game settlement. DEV APNs remains disabled.
 
-An IAM-authorized direct invocation of `yalla-dev-notification-router` can simulate a bot overtake for a DEV guest with positive weekly distance and an accepted bot relationship. Use `{action:"simulateFriendBotOvertake", recipient, bot, requestId, occurredAt}`. Use the API's settled round timestamp, within the same period and the last hour. The simulator checks actual membership and the recipient's settled distance, then sends a simulated event to the DEV queue. It requires APNs to be disabled and writes no distance data. The smoke test exercises this path.
+An IAM-authorized direct invocation of `yalla-dev-notification-router` can simulate a bot overtake for a DEV guest with positive weekly distance and an accepted bot relationship. Use `{action:"simulateFriendBotOvertake", recipient, bot, requestId, occurredAt}`. Use the API's settled round timestamp, within the same period and the last hour. The simulator checks actual membership and the recipient's settled distance, then sends a simulated event to the DEV queue. It requires APNs to be disabled and writes no distance data. Existing accepted bot relationships can still be used for this simulation.
 
 ## Invite site and cutover
 

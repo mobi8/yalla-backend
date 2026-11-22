@@ -103,6 +103,30 @@ describe('World economy and one-way progress',()=>{
   expect(b.worldState.repairs).toEqual([]);
   await f.service.execute(principal,'upgrade',{...await f.cmd(),buildingId,expectedLevel:3});
  });
+ it('honors a friend discount committed after the owner repair intent without charging twice',async()=>{
+  const f=await fixture(),p=f.items.get('PROGRESS');
+  f.live.get('world-buildings').data.defaults.upgradePrices=[11,21,31,41];
+  p.facilityLevels=[2,1,1,1,1];
+  p.villageDamage={worldRunId:p.worldRunId,village:p.village,buildings:{'building-1':'1'},levelsBefore:{'building-1':3}};
+  const command={...await f.cmd(),buildingId:'building-1' as const,attackId:'1'};
+  const commit=f.db.commit.bind(f.db);
+  f.db.commit=async(player,writes)=>{
+   if(writes.some(write=>write.sk===`WORLD#REQUEST#${command.requestId}`)){
+    await commit(player,writes);
+    const current=f.items.get('PROGRESS');
+    current.version++;
+    current.villageDamage.help={'building-1':{attackId:'1',savedYP:3}};
+    return;
+   }
+   await commit(player,writes);
+  };
+  const repaired=await f.service.execute(principal,'repair',command);
+  expect(repaired.result.cost).toBe(8);
+  expect(repaired.save.wallet.yallaPoint).toBe(992);
+  expect(repaired.save.progress.facilityLevels[0]).toBe(3);
+  expect(repaired.save.progress.villageDamage).toBeUndefined();
+  expect((await f.service.execute(principal,'repair',command)).save.wallet.yallaPoint).toBe(992);
+ });
  it('blocks completion and travel on current damage while ignoring damage from other checkpoints',async()=>{
   const f=await fixture(),p=f.items.get('PROGRESS');
   p.facilityLevels=[5,5,5,5,5];

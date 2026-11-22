@@ -1,10 +1,8 @@
 """Exercise Friends through the DEV API using two isolated guest identities."""
 from concurrent.futures import ThreadPoolExecutor
 import json
-from pathlib import Path
 import secrets
 import subprocess
-import tempfile
 import time
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -59,19 +57,6 @@ def settle(token):
     return result['round']['reward']['distance'], result['round']['settledAt']
 
 
-def queue_bot_simulation(player, bot, occurred_at):
-    with tempfile.TemporaryDirectory(prefix='yalla-friends-smoke-') as directory:
-        path = Path(directory)
-        event = {'action': 'simulateFriendBotOvertake', 'recipient': player, 'bot': bot,
-                 'requestId': str(uuid4()), 'occurredAt': occurred_at}
-        (path / 'event.json').write_text(json.dumps(event))
-        metadata = subprocess.run(AWS + ['lambda', 'invoke', '--function-name', 'yalla-dev-notification-router',
-            '--payload', 'fileb://' + str(path / 'event.json'), str(path / 'reply.json')], check=True, text=True, capture_output=True)
-        assert 'FunctionError' not in json.loads(metadata.stdout), (path / 'reply.json').read_text()
-        reply = json.loads((path / 'reply.json').read_text())
-        assert reply['queued'] == 1 and reply['eventIds'][0].startswith('FRIEND_RANK:'), reply
-
-
 def main():
     account = subprocess.check_output(AWS + ['sts', 'get-caller-identity', '--query', 'Account', '--output', 'text'], text=True).strip()
     if account != '533266967583':
@@ -116,25 +101,17 @@ def main():
     assert len(entries('rank', a)) == len(entries('rank', b)) == 1
     print('PASS cross requests, decline, cancel, idempotent accept and removal, both rankings', flush=True)
 
-    suggestions = entries('suggested', a)
-    assert 5 <= len(suggestions) <= 10 and suggestions[0]['type'] == 'BOT'
-    bot = suggestions[0]['code']
-    linked = send(a, bot)[1]
-    assert linked['status'] == 'ACCEPTED'
-    assert bot not in [entry['code'] for entry in entries('suggested', a)]
-    assert len(entries('rank', a)) == 2
-    distance, settled_at = settle(a)
+    assert entries('help', a) == entries('help', b) == []
+    send(a, 'bot-player_1001', expect=404)
+    distance, _ = settle(a)
     for _ in range(8):
         me = next(entry for entry in entries('rank', a) if entry['me'])
         if me['distanceMeters'] == distance:
             break
         time.sleep(1)
     assert me['distanceMeters'] == distance and float(distance) > 0
-    try:
-        queue_bot_simulation(first['save']['profile']['playerId'], bot, settled_at)
-    finally:
-        action(a, bot, linked['requestId'], 'remove')
-    print('PASS DEV bot auto-accept, weekly distance settlement and simulated overtake queued', flush=True)
+    assert all(entry['type'] == 'PLAYER' for entry in entries('suggested', b))
+    print('PASS real-player suggestions, empty HELP and weekly distance settlement', flush=True)
 
 
 if __name__ == '__main__':

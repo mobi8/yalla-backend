@@ -3,7 +3,7 @@ import { GetCommand, QueryCommand, TransactWriteCommand, type DynamoDBDocumentCl
 
 export type Key = { PK: string; SK: string };
 export type Item = Key & Record<string, unknown>;
-export type Write = { item: Item; expected?: string | null } | { remove: Key };
+export type Write = { item: Item; expected?: string | number | null } | { remove: Key } | { check: Key; expected: string };
 
 export interface FriendsStore {
   get(key: Key): Promise<Item | undefined>;
@@ -31,13 +31,18 @@ export class DynamoFriendsStore implements FriendsStore {
   async commit(writes: Write[]) {
     const TransactItems: TransactWriteCommandInput['TransactItems'] = writes.map(write => {
       if ('remove' in write) return { Delete: { TableName: this.table, Key: write.remove } };
+      if ('check' in write) return { ConditionCheck: {
+        TableName: this.table, Key: write.check, ConditionExpression: '#revision = :previous',
+        ExpressionAttributeNames: { '#revision': 'revision' },
+        ExpressionAttributeValues: { ':previous': write.expected },
+      } };
       const expected = write.expected;
       return { Put: {
         TableName: this.table, Item: write.item,
         ...(expected === null ? { ConditionExpression: 'attribute_not_exists(PK)' } :
           expected === undefined ? {} : {
-            ConditionExpression: '#revision = :previous',
-            ExpressionAttributeNames: { '#revision': 'revision' },
+            ConditionExpression: '#field = :previous',
+            ExpressionAttributeNames: { '#field': typeof expected === 'number' ? 'version' : 'revision' },
             ExpressionAttributeValues: { ':previous': expected },
           }),
       } };
@@ -48,7 +53,7 @@ export class DynamoFriendsStore implements FriendsStore {
     } catch (error) {
       if (error instanceof Error && error.name === 'TransactionCanceledException' &&
           'CancellationReasons' in error && Array.isArray(error.CancellationReasons) &&
-          error.CancellationReasons.some(reason => reason.Code === 'ConditionalCheckFailed')) return false;
+          error.CancellationReasons.some(reason => ['ConditionalCheckFailed', 'TransactionConflict'].includes(reason.Code))) return false;
       throw error;
     }
   }

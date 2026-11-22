@@ -4,8 +4,10 @@ import type { BotsSource } from './bots-config.js';
 import { acceptedFriends } from './friend-overtake.js';
 import { scaled } from './drop-economy.js';
 import type { JourneyReadService } from './journey-read.js';
-import type { Principal } from './model.js';
-import { ApiError, playerKey, type PlayerRepository } from './repository.js';
+import { currentVillageDamage, type Principal } from './model.js';
+import { ApiError, decodeProgress, playerKey, type PlayerRepository } from './repository.js';
+import { canHelpDamage, buildingIds } from './world-config.js';
+import type { FriendHelpService } from './friend-help.js';
 import type { FriendsStore, Item, Write } from './friends-store.js';
 
 const alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -45,8 +47,8 @@ const parse = <T>(schema: z.ZodType<T>, value: unknown) => {
 
 export class FriendsService {
   constructor(private store: FriendsStore, private players: Pick<PlayerRepository,'find'>,
-    private journey: Pick<JourneyReadService,'currentPeriodDistances'>, private bots: BotsSource,
-    private autoAcceptBots = false, private clock = Date.now, private mintCode = newCode) {}
+    private journey: Pick<JourneyReadService,'currentPeriodDistances'|'recentRankedPlayers'>, private bots: BotsSource,
+    private clock = Date.now, private mintCode = newCode, private friendHelp?: FriendHelpService) {}
 
   async code(player: string): Promise<string> {
     for (let attempt = 0; attempt < 8; attempt++) {
@@ -111,7 +113,7 @@ export class FriendsService {
   private async send(player: string, input: z.infer<typeof sendInput>) {
     const other = await this.target(input.code);
     if (player === other) return fail(400, 'CANNOT_ADD_SELF');
-    if (isBot(other) && !this.autoAcceptBots) return fail(404, 'FRIEND_CODE_NOT_FOUND');
+    if (isBot(other)) return fail(404, 'FRIEND_CODE_NOT_FOUND');
     const memo = playerKey(player, `FRIENDS#SENT#${input.requestId}`);
     for (let attempt = 0; attempt < 4; attempt++) {
       const [receipt, previous] = await Promise.all([this.store.get(memo), this.state(player,other)]);
@@ -123,11 +125,11 @@ export class FriendsService {
         return fail(409, previous.state === 'PENDING' ? 'REQUEST_PENDING' : 'ALREADY_FRIENDS');
       const now = this.clock();
       const timestamp = new Date(now).toISOString();
-      const status = isBot(other) ? 'ACCEPTED' : 'PENDING';
+      const status = 'PENDING';
       const next: State = { requestId: randomUUID(), revision: randomUUID(), sender: player, recipient: other,
-        state: status, updatedAt: timestamp, ...(status === 'ACCEPTED' ? {acceptedAt: timestamp} : {}) };
+        state: status, updatedAt: timestamp };
       const extra: Write[] = [{ item: { ...memo, status, other, requestId: next.requestId }, expected: null }];
-      if (input.referral && !isBot(other)) {
+      if (input.referral) {
         const key = playerKey(player, 'FRIENDS#REFERRAL');
         const profile = await this.store.get(playerKey(player, 'PROFILE'));
         const age = now - Date.parse(String(profile?.createdAt));
@@ -143,6 +145,7 @@ export class FriendsService {
 
   private async act(player: string, input: z.infer<typeof actionInput>) {
     const other = await this.target(input.code);
+    if (player === other) return fail(400, 'CANNOT_ADD_SELF');
     const previous = await this.state(player,other);
     if (!previous || previous.requestId !== input.requestId) return fail(404, 'REQUEST_NOT_FOUND');
     const allowed = input.action === 'remove' || (input.action === 'cancel' ? previous.sender === player : previous.recipient === player);
@@ -181,12 +184,34 @@ export class FriendsService {
   }
 
   private async suggestions(player: string) {
-    if (!this.autoAcceptBots) return { entries: [] };
-    const {bots} = await this.bots.load();
-    const ids = bots.map(bot => `bot-${bot.id}`);
+    const candidates = await this.journey.recentRankedPlayers(50);
+    const ids = candidates.filter(id => id !== player && !isBot(id));
     const pairs = await Promise.all(ids.map(id => this.state(player,id)));
-    const entries = ids.filter((_,i) => !pairs[i]);
-    return { entries: await Promise.all(entries.map(id => this.profile(id))) };
+    const entries = ids.filter((_,i) => pairs[i]?.state !== 'PENDING' && pairs[i]?.state !== 'ACCEPTED');
+    return { entries: await Promise.all(entries.slice(0,10).map(id => this.profile(id))) };
+  }
+
+  private async help(player: string, {limit,cursor}: z.infer<typeof pageInput>) {
+    const prefix = 'FRIENDS#LIST#';
+    const rows = await this.store.list(playerKey(player,'').PK,prefix,limit + 1,cursor && prefix + cursor);
+    const catalog = rows.length ? await this.friendHelp?.catalog() : undefined;
+    const entries = await Promise.all(rows.slice(0,limit).map(async row => {
+      const other = String(row.other);
+      if (isBot(other)) return;
+      const progress = await this.store.get(playerKey(other,'PROGRESS'));
+      if (!progress) return;
+      const village = decodeProgress(progress);
+      const damage = currentVillageDamage(village);
+      const world = catalog?.worlds.find(entry => entry.id === village.worldId);
+      const damagedBuildingCount = world && this.friendHelp
+        ? this.friendHelp.eligibleDamage(village, world).size
+        : buildingIds.filter(id => damage[id] && canHelpDamage(village, id)).length;
+      if (damagedBuildingCount > 0) return { ...await this.profile(other), targetId: other, damagedBuildingCount };
+    }));
+    return {
+      entries: entries.filter(entry => entry !== undefined),
+      nextCursor: rows.length > limit ? rows[limit - 1]!.SK.slice(prefix.length) : null,
+    };
   }
 
   private async rank(player: string) {
@@ -221,10 +246,11 @@ export class FriendsService {
       case 'GET /friends/list': return this.list(player,'LIST',parse(pageInput,query));
       case 'GET /friends/count': return { count: (await this.members(player,'IN')).length };
       case 'GET /friends/suggested': return this.suggestions(player);
+      case 'GET /friends/help': return this.help(player,parse(pageInput,query));
       case 'GET /friends/rank': return this.rank(player);
       case 'POST /friends/requests': return this.send(player,parse(sendInput,readBody()));
       case 'POST /friends/actions': return this.act(player,parse(actionInput,readBody()));
-      default: return fail(404,'ROUTE_NOT_FOUND');
+      default: return this.friendHelp?.route(player, route, query, readBody) ?? fail(404,'ROUTE_NOT_FOUND');
     }
   }
 }

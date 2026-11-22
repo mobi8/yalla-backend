@@ -776,6 +776,26 @@
                 },
                 {
                   "Effect": "Allow",
+                  "Action": "dynamodb:ConditionCheckItem",
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "PlayerTable",
+                      "Arn"
+                    ]
+                  },
+                  "Condition": {
+                    "ForAllValues:StringLike": {
+                      "dynamodb:LeadingKeys": [
+                        "FRIENDS#PAIR#*"
+                      ]
+                    },
+                    "StringEquals": {
+                      "dynamodb:EnclosingOperation": "TransactWriteItems"
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
                   "Action": "dynamodb:DeleteItem",
                   "Resource": {
                     "Fn::GetAtt": [
@@ -875,13 +895,6 @@
             "PHYSICS_VERSION": "fixed-fresh-round-v1",
             "COGNITO_ISSUER": {
               "Fn::Sub": "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
-            },
-            "FRIENDS_BOT_AUTO_ACCEPT": {
-              "Fn::If": [
-                "IsDev",
-                "true",
-                "false"
-              ]
             }
           }
         }
@@ -1994,6 +2007,126 @@
           "Ref": "Api"
         },
         "RouteKey": "GET /friends/rank",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsHelpRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /friends/help",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsHelpVisitRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /friends/help/visit",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsHelpRepairRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /friends/help/repair",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsHelpThanksRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /friends/help/thanks",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsHelpUnreadRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /friends/help/unread",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsHelpReadRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /friends/help/read",
         "Target": {
           "Fn::Sub": "integrations/${PlayerIntegration}"
         },

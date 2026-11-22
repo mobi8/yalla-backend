@@ -160,6 +160,9 @@ for name, route in (
     ("Incoming", "GET /friends/requests/incoming"), ("Outgoing", "GET /friends/requests/outgoing"),
     ("List", "GET /friends/list"), ("Count", "GET /friends/count"),
     ("Suggested", "GET /friends/suggested"), ("Rank", "GET /friends/rank"),
+    ("Help", "GET /friends/help"), ("HelpVisit", "GET /friends/help/visit"),
+    ("HelpRepair", "POST /friends/help/repair"), ("HelpThanks", "POST /friends/help/thanks"),
+    ("HelpUnread", "GET /friends/help/unread"), ("HelpRead", "POST /friends/help/read"),
     ("Request", "POST /friends/requests"), ("Action", "POST /friends/actions"),
     ("Invite", "GET /invites/{code}"),
 ):
@@ -169,12 +172,15 @@ for name, route in (
                            "AuthorizationScopes": ["aws.cognito.signin.user.admin"]})
     resources["Friends" + name + "Route"] = {"Type": "AWS::ApiGatewayV2::Route", "Condition": "IsDev", "Properties": properties}
 resources["PlayerRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"].append({
+    "Effect": "Allow", "Action": "dynamodb:ConditionCheckItem", "Resource": arn("PlayerTable"),
+    "Condition": {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["FRIENDS#PAIR#*"]},
+                  "StringEquals": {"dynamodb:EnclosingOperation": "TransactWriteItems"}},
+})
+resources["PlayerRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"].append({
     "Effect": "Allow", "Action": "dynamodb:DeleteItem", "Resource": arn("PlayerTable"),
     "Condition": {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["PLAYER#*"]},
                   "StringEquals": {"dynamodb:EnclosingOperation": "TransactWriteItems"}},
 })
-resources["PlayerFunction"]["Properties"]["Environment"]["Variables"]["FRIENDS_BOT_AUTO_ACCEPT"] = {
-    "Fn::If": ["IsDev", "true", "false"]}
 parameters["NotificationArtifactKey"] = {"Type": "String", "Default": ""}
 notification_artifact = {"Fn::If": ["HasNotificationArtifact", ref("NotificationArtifactKey"), ref("ArtifactKey")]}
 resources["PlayerFunction"]["Properties"]["Code"]["S3Key"] = notification_artifact

@@ -43,3 +43,15 @@ export async function loadWorldCatalog(configs:ConfigSource) {
   versions:{world:world.version,buildings:buildings.version,rewards:rewards.version},hashes:{world:world.contentHash,buildings:buildings.contentHash,rewards:rewards.contentHash},worlds};
 }
 export type WorldCatalog=Awaited<ReturnType<typeof loadWorldCatalog>>;
+
+export function villageRepairCost(progress: import('./model.js').Progress, building: WorldCatalog['worlds'][number]['buildings'][number]) {
+ const level = progress.villageDamage?.levelsBefore?.[building.id] ?? progress.facilityLevels[buildingIds.indexOf(building.id)]!;
+ const base = Math.ceil(building.levels[Math.max(0, level - 2)]!.upgradeCost! / 2);
+ const help = progress.villageDamage?.help?.[building.id];
+ return Math.max(0, base - (help?.savedYP ?? 0));
+}
+
+export function canHelpDamage(progress: import('./model.js').Progress, buildingId: typeof buildingIds[number]) {
+ // Owner repair clears this marker. A new attack ID does not reset an open damage cycle.
+ return progress.villageDamage?.help?.[buildingId] === undefined;
+}
