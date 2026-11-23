@@ -320,12 +320,32 @@ describe('atomic bonus lifecycle',()=>{
     expect(stored).toHaveLength(10);
     expect(stored[0]).toEqual({...existing, shieldRegenAt: f.save.wallet.updatedAt});
   });
-  it('consumes one bot shield and the raid ticket, pays zero, and never consumes the player shield',async()=>{
-    const f=await fixture('Raid',1);const previous=f.configs.load;f.configs.load=async name=>{const c=await previous(name);if(name==='raid')(c.data as any).initialShieldCounts[0]=1;return c;};
-    f.items.get('COLLECTION').shieldCount=3;await f.bonus.ensure(p,'Raid');const ready=await f.bonus.beginRaid(p,{requestId:randomUUID()});
-    const r=await f.bonus.attack(p,ready.result!.operation.raidId,{requestId:randomUUID(),facilityId:0});
-    expect(r.result!.result).toMatchObject({outcome:'BLOCKED',result:'BlockedByShield',rewardAmount:0,shieldConsumed:true});expect(r.bonus.raid.bots[0].shieldCount).toBe(0);
-    expect(f.items.get('COLLECTION').shieldCount).toBe(3);expect(f.items.get('WALLET').yallaPoint).toBe(0);
+  it.each([[1, 0], [2, 5], [5, 9]])('pays 10%% of the selected building price at level %i once after a shield block', async (level, reward) => {
+    const f = await fixture('Raid', 1);
+    const previous = f.configs.load;
+    f.configs.load = async name => {
+      const config = await previous(name);
+      if (name === 'raid') (config.data as any).initialShieldCounts[0] = 1;
+      if (name === 'world-buildings') (config.data as any).worldOverrides.dunes = {
+        buildingOverrides: {'building-2': {upgradePrices: [9, 59, 79, 99]}},
+      };
+      return config;
+    };
+    f.items.get('COLLECTION').shieldCount = 3;
+    await f.bonus.ensure(p,'Raid');
+    const facilities = f.items.get('BONUS#STATE').raid.bots[0].facilityLevels;
+    facilities[1] = level;
+    const ready = await f.bonus.beginRaid(p,{requestId:randomUUID()});
+    const id = ready.result!.operation.raidId;
+    const attack = () => f.bonus.attack(p,id,{requestId:randomUUID(),facilityId:1});
+    const [first, retry] = await Promise.all([attack(),attack()]);
+    expect(first.result!.result).toMatchObject({outcome:'BLOCKED',result:'BlockedByShield',rewardAmount:reward,shieldConsumed:true,blockedRewardEligible:true});
+    expect(retry.result!.result).toEqual(first.result!.result);
+    expect(first.bonus.raid.bots[0]).toMatchObject({shieldCount:0,facilityLevels:facilities});
+    expect(f.items.get('COLLECTION')).toMatchObject({shieldCount:3,raidTickets:0});
+    await f.bonus.acknowledge(p,'Raid',id);
+    await f.bonus.acknowledge(p,'Raid',id);
+    expect(f.items.get('WALLET').yallaPoint).toBe(reward);
   });
   it('restarts the timer after consuming a full bot shield and commits concurrent attacks once',async()=>{
     const f=await fixture('Raid',1);const previous=f.configs.load;f.configs.load=async name=>{const c=await previous(name);if(name==='raid')(c.data as any).initialShieldCounts[0]=3;return c;};

@@ -11,6 +11,7 @@ import { ApiError, createDynamoRepository, type PlayerRepository } from './repos
 import { DropService, DynamoDropStore, type DropStore, type Write, type Session } from './drop.js';
 import { GameConfigs, type ConfigSource, type GameConfig } from './game-config.js';
 import { collectionSchema, type Collection } from './drop-economy.js';
+import { buildingIds, loadWorldCatalog } from './world-config.js';
 import { walletSchema, type Principal, type Save } from './model.js';
 export const bonusInput = z.strictObject({ requestId: z.string().uuid() });
 export const kindInput = z.strictObject({ kind: z.enum(['Jackpot','Raid']) });
@@ -240,10 +241,21 @@ export class BonusService {
       const storedBot=state.raid.bots.find((b:Item)=>b.botId===op.botId);
       const bot=storedBot && regenBot(storedBot as {shieldCount:number; shieldRegenAt?:string | null},this.clock(),(await this.botsConfig.load()).shield.regenHours) as Item;
       if(!bot || bot.stateVersion!==op.botStateVersion) throw new ApiError(409,'BOT_STATE_CHANGED');
-      const blocked=bot.shieldCount>0,reward=blocked?0:op.eligibleCosts[input.facilityId]*op.multiplier;
+      const blocked=bot.shieldCount>0;
+      let reward=op.eligibleCosts[input.facilityId]*op.multiplier;
+      if(blocked) {
+        const catalog=await loadWorldCatalog(this.configs);
+        const world=catalog.worlds.find(entry=>entry.id===op.worldId);
+        const building=world?.buildings.find(entry=>entry.id===buildingIds[input.facilityId]);
+        // MAX uses the final upgrade price, just as the local ATTACK price lookup does.
+        const level=Math.min(bot.facilityLevels[input.facilityId],4);
+        const price=building?.levels[level-1]?.upgradeCost;
+        if(price==null) throw new ApiError(503,'ATTACK_BUILDING_PRICE_UNAVAILABLE');
+        reward=Math.floor(price/10);
+      }
       const result={raidId:id,attackerId:player,defenderId:bot.botId,attackerEntityType:'LocalPlayer',defenderEntityType:'SystemBot',
         selectedFacilityId:input.facilityId,worldId:op.worldId,village:op.village,result:blocked?'BlockedByShield':'Success',rewardAmount:reward,
-        outcome:blocked?'BLOCKED':'HIT',shieldConsumed:blocked,timestamp:this.now()};
+        outcome:blocked?'BLOCKED':'HIT',shieldConsumed:blocked,...(blocked?{blockedRewardEligible:true}:{}),timestamp:this.now()};
       const wallet=walletSchema.parse({...ctx.save.wallet,yallaPoint:ctx.save.wallet.yallaPoint+reward,...meta(this.now(),ctx.save.wallet.version+1)});
       const collection=collectionSchema.parse({...ctx.collection,raidTickets:ctx.collection.raidTickets-op.ticketCost,...meta(this.now(),ctx.collection.version+1)});
       const raid={...state.raid,bots:state.raid.bots.map((b:Item)=>b.botId===bot.botId?{...bot,shieldCount:bot.shieldCount-(blocked?1:0),shieldRegenAt:blocked && bot.shieldCount>=3 ? this.now() : bot.shieldRegenAt,stateVersion:bot.stateVersion+1}:b),

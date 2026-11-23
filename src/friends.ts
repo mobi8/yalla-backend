@@ -7,6 +7,7 @@ import type { JourneyReadService } from './journey-read.js';
 import { currentVillageDamage, type Principal } from './model.js';
 import { ApiError, decodeProgress, playerKey, type PlayerRepository } from './repository.js';
 import { canHelpDamage, buildingIds } from './world-config.js';
+import { friendsRankQuery, type FriendsRankingService } from './friends-ranking.js';
 import type { FriendHelpService } from './friend-help.js';
 import type { FriendsStore, Item, Write } from './friends-store.js';
 
@@ -48,7 +49,7 @@ const parse = <T>(schema: z.ZodType<T>, value: unknown) => {
 export class FriendsService {
   constructor(private store: FriendsStore, private players: Pick<PlayerRepository,'find'>,
     private journey: Pick<JourneyReadService,'currentPeriodDistances'|'recentRankedPlayers'>, private bots: BotsSource,
-    private clock = Date.now, private mintCode = newCode, private friendHelp?: FriendHelpService) {}
+    private clock = Date.now, private mintCode = newCode, private friendHelp?: FriendHelpService, private cumulativeRank?: FriendsRankingService) {}
 
   async code(player: string): Promise<string> {
     for (let attempt = 0; attempt < 8; attempt++) {
@@ -246,8 +247,18 @@ export class FriendsService {
       case 'GET /friends/list': return this.list(player,'LIST',parse(pageInput,query));
       case 'GET /friends/count': return { count: (await this.members(player,'IN')).length };
       case 'GET /friends/suggested': return this.suggestions(player);
-      case 'GET /friends/help': return this.help(player,parse(pageInput,query));
+      case 'GET /friends/help': {
+        const page = parse(pageInput,query);
+        const [list, balance] = await Promise.all([
+          this.help(player,page), page.cursor ? undefined : this.friendHelp?.clover(player),
+        ]);
+        return { ...list, ...balance };
+      }
       case 'GET /friends/rank': return this.rank(player);
+      case 'GET /friends/ranking': {
+        const {scope} = parse(friendsRankQuery,query);
+        return this.cumulativeRank?.get(player,scope) ?? fail(503,'RANKING_NOT_CONFIGURED');
+      }
       case 'POST /friends/requests': return this.send(player,parse(sendInput,readBody()));
       case 'POST /friends/actions': return this.act(player,parse(actionInput,readBody()));
       default: return this.friendHelp?.route(player, route, query, readBody) ?? fail(404,'ROUTE_NOT_FOUND');

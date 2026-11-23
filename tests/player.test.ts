@@ -29,6 +29,25 @@ function dynamo() {
     parseConfig(name, readFileSync(new URL(`../config/dev/${name}.json`, import.meta.url), 'utf8'), 'dev') },
   { load: async () => DEFAULT_BOTS }) };
 }
+describe('Profile avatar', () => {
+  it('updates only the authenticated player using a selectable avatar ID', async () => {
+    const backend = dynamo();
+    const profile = { ...save().profile, nickname: 'Guest 0004' };
+    const avatarId = '1914377d7b894820acd70169db0c7f5d';
+    backend.send.mockResolvedValueOnce({Item:{player:profile.playerId, playerId:profile.playerId, provider:'guest'}})
+      .mockResolvedValueOnce({Item:profile}).mockResolvedValueOnce({});
+    const handle = createHandler(new PlayerService(backend.repository));
+    expect((await handle(event('POST', '/players/me/avatar', JSON.stringify({avatarId:'unknown'})))).statusCode).toBe(400);
+    expect((await handle(event('POST', '/players/me/avatar', JSON.stringify({avatarId,playerId:'someone else'})))).statusCode).toBe(400);
+    const result = await handle(event('POST', '/players/me/avatar', JSON.stringify({avatarId})));
+    expect(result.statusCode).toBe(200);
+    expect(JSON.parse(result.body)).toMatchObject({playerId:profile.playerId, nickname:profile.nickname, avatarId, version:2});
+    expect(backend.send.mock.calls[2]?.[0].input.TransactItems[0].Put).toMatchObject({
+      Item:{PK:`PLAYER#${profile.playerId}`,SK:'PROFILE',avatarId}, ConditionExpression:'#version = :version',
+    });
+  });
+});
+
 describe('Unity-compatible models', () => {
   it('uses the existing profile and progress defaults and a server UUID', () => {
     const s = save();

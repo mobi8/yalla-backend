@@ -1,8 +1,9 @@
-import { decimalString } from './model.js';
+import { decimalString, longString } from './model.js';
 import { scaled } from './drop-economy.js';
 
 type Stored = Record<string, any>;
 export const journeyIndex = 'JourneyRead';
+export const friendRankPartition = 'PLAYERS';
 export const totalPartition = 'DISTANCE#TOTAL';
 export const deltaPartition = 'DISTANCE#DELTA';
 export const activityPartition = (player: string) => `FEED#${player}`;
@@ -59,9 +60,17 @@ export function privateActivity(player: string, sk: string, value: Stored) {
   };
 }
 
+export function friendRankKeys(distance: string, stars: string, player: string) {
+  const metersKey = String(scaled(distance)).padStart(57, '0');
+  const starsKey = stars.padStart(19, '0');
+  return { friendsRankPK: friendRankPartition, friendsStarsSK: `${starsKey}#${metersKey}#${player}`,
+    friendsDistanceSK: `${metersKey}#${starsKey}#${player}` };
+}
+
 export function journeyReadKeys(player: string, sk: string, value: Stored) {
   if (sk === 'PROGRESS' && decimalString.safeParse(value.distance).success)
-    return { journeyPK: totalPartition, journeySK: distanceOrder(value.distance, player), rankDistance: value.distance };
+    return { journeyPK: totalPartition, journeySK: distanceOrder(value.distance, player), rankDistance: value.distance,
+      ...(longString.safeParse(value.constructionStars).success ? friendRankKeys(value.distance, value.constructionStars, player) : {}) };
   if (sk.startsWith('ROUND#') && value.status === 'SETTLED') {
     const when = iso(value.settledAt);
     const distance = decimalString.safeParse(value.reward?.distance);
@@ -74,6 +83,6 @@ export function journeyReadKeys(player: string, sk: string, value: Stored) {
 }
 
 export function withoutJourneyKeys(value: Stored) {
-  const { journeyPK, journeySK, rankDistance, ...stored } = value;
+  const { journeyPK, journeySK, rankDistance, friendsRankPK, friendsStarsSK, friendsDistanceSK, ...stored } = value;
   return stored;
 }

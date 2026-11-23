@@ -69,6 +69,39 @@ resources = {
         "AccessLogSettings": {"DestinationArn": arn("AccessLogs"), "Format": '{"requestId":"$context.requestId","route":"$context.routeKey","status":"$context.status"}'},
     }},
 }
+# DynamoDB allows adding one GSI per CloudFormation update. Stage stars, then both.
+parameters["FriendsRankIndexes"] = {"Type":"String","Default":"none","AllowedValues":["none","stars","both"]}
+parameters["FriendsRankSchedule"] = {"Type":"String","Default":"disabled","AllowedValues":["disabled","enabled"]}
+no_value = ref("AWS::NoValue")
+rank_table = resources["PlayerTable"]["Properties"]
+for attribute, condition in (("friendsRankPK","HasFriendsStars"), ("friendsStarsSK","HasFriendsStars"),
+                             ("friendsDistanceSK","HasFriendsDistance")):
+    rank_table["AttributeDefinitions"].append({"Fn::If":[condition,{"AttributeName":attribute,"AttributeType":"S"},no_value]})
+for name, sort, condition in (("FriendsRankStars","friendsStarsSK","HasFriendsStars"),
+                              ("FriendsRankDistance","friendsDistanceSK","HasFriendsDistance")):
+    rank_table["GlobalSecondaryIndexes"].append({"Fn::If":[condition,{"IndexName":name,
+        "KeySchema":[{"AttributeName":"friendsRankPK","KeyType":"HASH"},{"AttributeName":sort,"KeyType":"RANGE"}],
+        "Projection":{"ProjectionType":"KEYS_ONLY"}},no_value]})
+resources["FriendsRankLogs"] = {"Type":"AWS::Logs::LogGroup","Condition":"HasFriendsDistance",
+    "Properties":{"LogGroupName":sub("/aws/lambda/yalla-${Environment}-friends-ranking"),"RetentionInDays":30}}
+resources["FriendsRankRole"] = {"Type":"AWS::IAM::Role","Condition":"HasFriendsDistance","Properties":{
+    "AssumeRolePolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]},
+    "Policies":[{"PolicyName":"FriendsRank","PolicyDocument":{"Version":"2012-10-17","Statement":[
+        {"Effect":"Allow","Action":["logs:CreateLogStream","logs:PutLogEvents"],"Resource":sub("${FriendsRankLogs.Arn}:*")},
+        {"Effect":"Allow","Action":"dynamodb:Query","Resource":[sub("${PlayerTable.Arn}/index/"+name) for name in ("FriendsRankStars","FriendsRankDistance")]},
+        {"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem"],"Resource":arn("PlayerTable"),
+         "Condition":{"ForAllValues:StringEquals":{"dynamodb:LeadingKeys":["RANKING#FRIENDS"]}}},
+    ]}}]}}
+resources["FriendsRankFunction"] = {"Type":"AWS::Lambda::Function","Condition":"HasFriendsDistance","DependsOn":"FriendsRankLogs",
+    "Properties":{"FunctionName":sub("yalla-${Environment}-friends-ranking"),"Runtime":"nodejs24.x","Architectures":["arm64"],
+    "Handler":"dist/friends-ranking.handler","MemorySize":256,"Timeout":60,"Role":arn("FriendsRankRole"),
+    "Code":{"S3Bucket":ref("ArtifactBucket"),"S3Key":ref("ArtifactKey")},
+    "Environment":{"Variables":{"PLAYER_TABLE":ref("PlayerTable")}}}}
+resources["FriendsRankRule"] = {"Type":"AWS::Events::Rule","Condition":"HasFriendsDistance",
+    "Properties":{"ScheduleExpression":"cron(0 0 * * ? *)","State":{"Fn::If":["FriendsRankScheduleOn","ENABLED","DISABLED"]},
+    "Targets":[{"Id":"friends-ranking","Arn":arn("FriendsRankFunction")}]}}
+resources["FriendsRankPermission"] = {"Type":"AWS::Lambda::Permission","Condition":"HasFriendsDistance",
+    "Properties":{"FunctionName":ref("FriendsRankFunction"),"Action":"lambda:InvokeFunction","Principal":"events.amazonaws.com","SourceArn":arn("FriendsRankRule")}}
 resources["IncomingLogs"] = {"Type":"AWS::Logs::LogGroup", "Properties":{"LogGroupName":sub("/aws/lambda/yalla-${Environment}-incoming-raid"),"RetentionInDays":30}}
 resources["IncomingRole"] = {"Type":"AWS::IAM::Role", "Properties":{
     "AssumeRolePolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]},
@@ -95,6 +128,8 @@ for prefix in ["Auth", "Player"]:
     if prefix == "Player":
         statements += [
             {"Effect": "Allow", "Action": ["dynamodb:Query"], "Resource": [arn("PlayerTable"), sub("${PlayerTable.Arn}/index/JourneyRead")]},
+            {"Effect": "Allow", "Action": "dynamodb:BatchGetItem", "Resource": arn("PlayerTable"),
+             "Condition": {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["PLAYER#*"]}}},
             {"Effect": "Allow", "Action": ["dynamodb:PutItem"], "Resource": arn("PlayerTable"),
              "Condition": {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["PLAYER#*"]},
                            "ForAllValues:StringEquals": {"dynamodb:Attributes": ["PK", "SK", "activityPartition", "lastActiveAt"]}}},
@@ -131,6 +166,7 @@ for prefix in ["Auth", "Player"]:
 routes = [("AuthGuest", "POST /auth/guest", "Auth"), ("AuthRefresh", "POST /auth/refresh", "Auth"), ("AuthLogout", "POST /auth/logout", "Auth"),
           ("GuestCreate", "POST /players/guest", "Player"),
            ("PlayerHeartbeat", "POST /players/me/heartbeat", "Player"), ("ProfileGet", "GET /players/me", "Player"),
+           ("ProfileAvatar", "POST /players/me/avatar", "Player"),
           ("SaveGet", "GET /players/me/save", "Player"), ("ProgressGet", "GET /players/me/progress", "Player"), ("WalletGet", "GET /players/me/wallet", "Player")]
 routes += [("DropSessionOpen", "POST /drop/sessions", "Player"),
            ("DropSessionActive", "GET /drop/sessions/active", "Player"),
@@ -159,7 +195,7 @@ for name, route in (
     ("Code", "GET /friends/code"), ("Search", "GET /friends/search"),
     ("Incoming", "GET /friends/requests/incoming"), ("Outgoing", "GET /friends/requests/outgoing"),
     ("List", "GET /friends/list"), ("Count", "GET /friends/count"),
-    ("Suggested", "GET /friends/suggested"), ("Rank", "GET /friends/rank"),
+    ("Suggested", "GET /friends/suggested"), ("Rank", "GET /friends/rank"), ("CumulativeRank", "GET /friends/ranking"),
     ("Help", "GET /friends/help"), ("HelpVisit", "GET /friends/help/visit"),
     ("HelpRepair", "POST /friends/help/repair"), ("HelpThanks", "POST /friends/help/thanks"),
     ("HelpUnread", "GET /friends/help/unread"), ("HelpRead", "POST /friends/help/read"),
@@ -263,6 +299,9 @@ notification_resource("NotificationQueueMapping","AWS::Lambda::EventSourceMappin
 
 template = {"AWSTemplateFormatVersion": "2010-09-09", "Parameters": parameters,
             "Conditions": {"IsDev": {"Fn::Equals": [ref("Environment"), "dev"]},
+                "HasFriendsStars": {"Fn::Not":[{"Fn::Equals":[ref("FriendsRankIndexes"),"none"]}]},
+                "HasFriendsDistance": {"Fn::Equals":[ref("FriendsRankIndexes"),"both"]},
+                "FriendsRankScheduleOn": {"Fn::Equals":[ref("FriendsRankSchedule"),"enabled"]},
                 "HasNotificationArtifact": {"Fn::And": [{"Condition":"IsDev"},
                   {"Fn::Not": [{"Fn::Equals":[ref("NotificationArtifactKey"), ""]}]}]}}, "Resources": resources,
             "Outputs": {key: {"Value": value} for key, value in {

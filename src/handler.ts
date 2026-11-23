@@ -1,3 +1,4 @@
+import { DynamoFriendsRankingStore, FriendsRankingService } from './friends-ranking.js';
 import { FriendHelpService } from './friend-help.js';
 import { BotsConfigs } from './bots-config.js';
 import { FriendsService } from './friends.js';
@@ -17,6 +18,12 @@ import { activityQuery, createJourneyReadService, rankingQuery, type JourneyRead
 import { PlayerService } from './service.js';
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import { CognitoGuestIdentity, guestKeySchema, type GuestIdentity } from './auth.js';
+
+const avatarInput = z.strictObject({ avatarId: z.enum([
+  '1914377d7b894820acd70169db0c7f5d', '3c885d9cccbf4b919b2a33f1f888ea4b', '04c7662389e4465e83cab8997e0de696',
+  'ae6a6b0db4994642a1b45102daa825bd', 'd0cc4f5e972e4d7fb228f8d0b59affcc', '721e172b07fb4d1cb7718a2061bca2ba',
+  'ede370ced3294d71ae386fe138bc2c32', '1faa87e6c34449cb9672456d96ab613e', 'de3d2f7001144834995b261a7eddd152',
+]) });
 
 export interface HttpEvent {
   rawPath: string; queryStringParameters?: Record<string, string>; body?: string | null; isBase64Encoded?: boolean;
@@ -159,6 +166,12 @@ export function createHandler(service: PlayerService, authenticate: Authenticate
         await activePrincipal();
         return { statusCode: 204, headers: { 'cache-control': 'no-store' }, body: '' };
       }
+      if (route === 'POST /players/me/avatar') {
+        const principal = await authenticate(event);
+        const input = avatarInput.safeParse(body(event));
+        if (!input.success) throw new ApiError(400, 'INVALID_REQUEST');
+        return response(200, await service.setAvatar(principal, input.data.avatarId));
+      }
       if (!['POST /players/guest', 'GET /players/me', 'GET /players/me/save', 'GET /players/me/progress', 'GET /players/me/wallet'].includes(route))
         throw new ApiError(404, 'ROUTE_NOT_FOUND');
       const principal = await authenticate(event);
@@ -211,7 +224,7 @@ export async function handler(event: HttpEvent | z.infer<typeof opsNicknameReque
     const friendsClient = DynamoDBDocumentClient.from(new DynamoDBClient({}), { unmarshallOptions: playerNumberOptions });
     const friendsStore = new DynamoFriendsStore(friendsClient, table);
     const friends = new FriendsService(friendsStore, players, journey, new BotsConfigs(), undefined, undefined,
-      new FriendHelpService(friendsStore, configs));
+      new FriendHelpService(friendsStore, configs), new FriendsRankingService(new DynamoFriendsRankingStore(friendsClient, table)));
     configured = createHandler(new PlayerService(players), cognitoContext,
     new CognitoGuestIdentity(new CognitoIdentityProviderClient({ region: process.env.AWS_REGION ?? 'ap-south-1' }),
       process.env.USER_POOL_ID, process.env.USER_POOL_CLIENT_ID), drops, createBonusService(process.env.PLAYER_TABLE, drops, configs),createWorldService(process.env.PLAYER_TABLE,drops,configs), async principal => {

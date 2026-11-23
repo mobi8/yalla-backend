@@ -17,6 +17,7 @@ export interface PlayerRepository {
   find(principal: Principal): Promise<string | undefined>;
   read(playerId: string): Promise<Save | undefined>;
   create(principal: Principal, save: Save): Promise<void>;
+  setAvatar?(playerId: string, avatarId: string): Promise<Profile | undefined>;
 }
 type Writes = NonNullable<TransactWriteCommandInput['TransactItems']>;
 export const authKey = (p: Principal) => ({ PK: `AUTH#${p.provider}#${p.subject}`, SK: 'PLAYER' });
@@ -114,8 +115,25 @@ export class DynamoPlayerRepository implements PlayerRepository {
     return save;
   }
 
+  async setAvatar(playerId: string, avatarId: string): Promise<Profile | undefined> {
+    return this.retryProfileWrite(async () => {
+      const key = playerKey(playerId, 'PROFILE');
+      const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: key, ConsistentRead: true }));
+      if (!Item) return undefined;
+      const profile = readProfile(Item, playerId);
+      if (profile.avatarId === avatarId) return profile;
+      const updated = { ...profile, avatarId, version: profile.version + 1, updatedAt: new Date().toISOString() };
+      await this.commit([{ Put: {
+        TableName: this.table, Item: { ...key, ...updated }, ConditionExpression: '#version = :version',
+        ExpressionAttributeNames: { '#version': 'version' },
+        ExpressionAttributeValues: { ':version': profile.version },
+      } }]);
+      return updated;
+    });
+  }
+
   async ensureProfileNickname(playerId: string): Promise<Profile | undefined> {
-    return this.retryNicknameWrite(async () => {
+    return this.retryProfileWrite(async () => {
       const { Item } = await this.client.send(new GetCommand({
         TableName: this.table, Key: playerKey(playerId, 'PROFILE'), ConsistentRead: true,
       }));
@@ -154,7 +172,7 @@ export class DynamoPlayerRepository implements PlayerRepository {
     return { nickname: `Guest ${String(number).padStart(4, '0')}`, write };
   }
 
-  private async retryNicknameWrite<T>(write: () => Promise<T>): Promise<T> {
+  private async retryProfileWrite<T>(write: () => Promise<T>): Promise<T> {
     for (let attempt = 0; ; attempt++) {
       try { return await write(); }
       catch (error) {
@@ -185,7 +203,7 @@ export class DynamoPlayerRepository implements PlayerRepository {
       put({ ...playerKey(profile.playerId, 'INCOMING#SCHEDULE'), ...newIncomingSchedule(profile.playerId, Date.parse(profile.createdAt)) }),
     ];
     if (!needsNickname(profile.nickname)) return this.commit(writes);
-    await this.retryNicknameWrite(async () => {
+    await this.retryProfileWrite(async () => {
       // Preserve the existing auth-link condition and avoid retrying a losing duplicate guest creation.
       if (await this.find(principal)) throw new ApiError(409, 'PLAYER_ALREADY_EXISTS');
       const { nickname, write } = await this.nextNickname();

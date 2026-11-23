@@ -97,7 +97,10 @@ async function helpFixture(buildingCount = 2) {
   const [ownerCode, helperCode] = await Promise.all([f.service.code(b), f.service.code(a)]);
   const request = await f.send(a, ownerCode);
   await f.action(b, helperCode, request.requestId, 'accept');
-  const progress = newSave().progress;
+  const save = newSave();
+  const wallet = { ...playerKey(a, 'WALLET'), ...save.wallet };
+  f.store.rows.set(key(wallet),wallet);
+  const progress = save.progress;
   const buildings = Object.fromEntries(Array.from({length: buildingCount}, (_,i) => [`building-${i+1}`, String(i+1)]));
   const damaged = { ...playerKey(b, 'PROGRESS'), ...progress, facilityLevels: [2,2,2,2,2],
     villageDamage: { worldRunId: progress.worldRunId, village: progress.village, buildings } };
@@ -123,6 +126,55 @@ async function helpFixture(buildingCount = 2) {
 }
 
 describe('Friend help cycle', () => {
+  it('atomically pays the same repair roll once, including simultaneous and later retries', async () => {
+    const f = await helpFixture();
+    const wallet = playerKey(a, 'WALLET');
+    const requestId = randomUUID();
+    expect(await f.store.get(wallet)).toMatchObject({energy:50,version:1});
+    const [repair, concurrent] = await Promise.all([f.repair(requestId), f.repair(requestId)]);
+    expect(repair.energyReward).toBe(repair.event.percent);
+    expect(repair.energyReward).toBe(30);
+    expect(concurrent).toEqual(repair);
+    expect(await f.repair(requestId)).toEqual(repair);
+    expect(await f.store.get(wallet)).toMatchObject({energy:80,version:2});
+    expect((await f.visit()).clover.remaining).toBe(4);
+  });
+
+  it('keeps Wallet and Clover unchanged when repair fails', async () => {
+    const f = await helpFixture(0);
+    await expect(f.repair()).rejects.toMatchObject({code:'NO_HELP_ELIGIBLE_DAMAGE'});
+    expect(await f.store.get(playerKey(a,'WALLET'))).toMatchObject({energy:50,version:1});
+    expect((await f.visit()).clover.remaining).toBe(5);
+  });
+
+  it('includes authoritative clover on the first HELP page even when the list is empty', async () => {
+    const f = await helpFixture(1);
+    await f.repair();
+    const empty = await f.api(a,'GET /friends/help');
+    expect(empty).toMatchObject({entries:[], clover:{remaining:4,capacity:5},
+      serverTime:new Date(today).toISOString()});
+    expect(empty.clover).toEqual((await f.visit()).clover);
+    f.tick(4 * 60 * 60 * 1000);
+    expect((await f.api(a,'GET /friends/help')).clover)
+      .toMatchObject({remaining:5,nextAt:null});
+  });
+
+  it('returns the visited friend’s equipped costume without exposing inventory or using the visitor’s outfit', async () => {
+    const f = await helpFixture();
+    const visitor = { ...playerKey(a, 'COSTUME'), equipped: {HEAD: 'camel_hat_yellow_snow'} };
+    f.store.rows.set(key(visitor), visitor);
+    expect((await f.visit()).equippedCostume).toEqual({});
+    const owner = { ...playerKey(b, 'COSTUME'), ownedIds: ['camel_hat_viking', 'camel_glasses_gold', 'camel_glasses_ray_ban'],
+      equipped: {HEAD: 'camel_hat_viking', GLASS: 'camel_glasses_gold'} };
+    f.store.rows.set(key(owner), owner);
+    const view = await f.visit();
+    expect(view.equippedCostume).toEqual(owner.equipped);
+    expect(view).not.toHaveProperty('ownedIds');
+    f.store.rows.set(key(owner), { ...owner, equipped: {HEAD: null, GLASS: 'camel_glasses_ray_ban'} });
+    expect((await f.visit()).equippedCostume).toEqual({HEAD: null, GLASS: 'camel_glasses_ray_ban'});
+    await expect(f.visit(c)).rejects.toMatchObject({code:'FRIEND_REQUIRED'});
+  });
+
   it('discounts one random eligible building once, keeps damage and lists remaining eligible damage', async () => {
     const f = await helpFixture();
     await expect(f.visit(c)).rejects.toMatchObject({code:'FRIEND_REQUIRED'});
@@ -147,6 +199,22 @@ describe('Friend help cycle', () => {
     await f.api(b,'POST /friends/help/read',{}, {eventId:first.event.eventId});
     expect((await f.unread()).entries).toHaveLength(1);
     expect((await f.activity(b).activity(principal(b),{limit:20})).events).toHaveLength(2);
+  });
+
+  it('uses the current sender avatar for existing repair and thanks cards', async () => {
+    const f = await helpFixture();
+    const repair = await f.repair();
+    await f.thanks(b, repair.event.eventId);
+    const helperAvatar = '1914377d7b894820acd70169db0c7f5d';
+    const ownerAvatar = '3c885d9cccbf4b919b2a33f1f888ea4b';
+    for (const [id, avatarId] of [[a,helperAvatar],[b,ownerAvatar]] as const) {
+      const profile = playerKey(id, 'PROFILE');
+      f.store.rows.set(key(profile), { ...await f.store.get(profile), ...profile, avatarId });
+    }
+    expect((await f.activity(b).activity(principal(b),{limit:20})).events[0])
+      .toMatchObject({type:'FRIEND_HELP_REPAIR',sender:{id:a,avatarId:helperAvatar}});
+    expect((await f.activity(a).activity(principal(a),{limit:20})).events[0])
+      .toMatchObject({type:'FRIEND_HELP_THANKS',sender:{id:b,avatarId:ownerAvatar}});
   });
 
   it('atomically sends exactly one thanks per original event and preserves RAID feed entries', async () => {

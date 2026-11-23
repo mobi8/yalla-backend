@@ -114,6 +114,7 @@ with tempfile.TemporaryDirectory(prefix='yalla-package-') as temp:
         aws('cloudformation','wait','stack-update-complete','--stack-name',stack)
     else:
         aws('cloudformation', 'deploy', '--stack-name', f'yalla-{args.environment}-bundle1', '--template-file', 'infra/bundle1.json',
+            '--s3-bucket', bucket, '--s3-prefix', 'bundle1/templates',
             '--capabilities', 'CAPABILITY_IAM', '--parameter-overrides', f'Environment={args.environment}', f'ArtifactBucket={bucket}', f'ArtifactKey={key}',
             *( [f'NotificationArtifactKey={key}'] if dev_policy is not None else [] ),
             '--no-fail-on-empty-changeset')

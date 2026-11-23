@@ -222,13 +222,22 @@ export class JourneyReadService {
       nextKey = rows.length > query.limit ? scanCursor : undefined;
       if (!nextKey) break;
     }
-    const profile = await this.store.get(player, 'PROFILE');
+    const visible = records.slice(0, query.limit);
+    const senderSchema = z.object({ id: z.uuid(), type: z.literal('PLAYER') }).passthrough();
+    const senders = visible.map(record => record.social ? senderSchema.safeParse(record.event.sender).data : undefined);
+    const profiles = await this.profiles([player, ...senders.flatMap(sender => sender ? [sender.id] : [])]);
     const named = (party: { id: string; type: string }) => ({
-      ...party, nickname: party.type === 'BOT' ? party.id : profile?.nickname ?? null,
+      ...party, nickname: party.type === 'BOT' ? party.id : profiles.get(party.id)?.nickname ?? null,
     });
-    const events = records.slice(0, query.limit).map(({social,event}) => social ? event : ({
-      ...event, attacker: named(event.attacker), defender: named(event.defender),
-    }));
+    const events = visible.map(({social,event}, index) => {
+      if (!social) return { ...event, attacker: named(event.attacker), defender: named(event.defender) };
+      const sender = senders[index];
+      const profile = sender && profiles.get(sender.id);
+      return profile ? {
+        ...event,
+        sender: { ...sender, nickname: profile.nickname ?? sender.nickname, avatarId: profile.avatarId ?? sender.avatarId },
+      } : event;
+    });
     return { events, nextCursor: cursorFor(partition, records.length > query.limit ? records[query.limit-1]?.key : nextKey) };
   }
 }

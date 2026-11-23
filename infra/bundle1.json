@@ -22,6 +22,23 @@
       "MinValue": 1,
       "MaxValue": 31
     },
+    "FriendsRankIndexes": {
+      "Type": "String",
+      "Default": "none",
+      "AllowedValues": [
+        "none",
+        "stars",
+        "both"
+      ]
+    },
+    "FriendsRankSchedule": {
+      "Type": "String",
+      "Default": "disabled",
+      "AllowedValues": [
+        "disabled",
+        "enabled"
+      ]
+    },
     "NotificationArtifactKey": {
       "Type": "String",
       "Default": ""
@@ -34,6 +51,34 @@
           "Ref": "Environment"
         },
         "dev"
+      ]
+    },
+    "HasFriendsStars": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "FriendsRankIndexes"
+            },
+            "none"
+          ]
+        }
+      ]
+    },
+    "HasFriendsDistance": {
+      "Fn::Equals": [
+        {
+          "Ref": "FriendsRankIndexes"
+        },
+        "both"
+      ]
+    },
+    "FriendsRankScheduleOn": {
+      "Fn::Equals": [
+        {
+          "Ref": "FriendsRankSchedule"
+        },
+        "enabled"
       ]
     },
     "HasNotificationArtifact": {
@@ -95,6 +140,42 @@
           {
             "AttributeName": "journeySK",
             "AttributeType": "S"
+          },
+          {
+            "Fn::If": [
+              "HasFriendsStars",
+              {
+                "AttributeName": "friendsRankPK",
+                "AttributeType": "S"
+              },
+              {
+                "Ref": "AWS::NoValue"
+              }
+            ]
+          },
+          {
+            "Fn::If": [
+              "HasFriendsStars",
+              {
+                "AttributeName": "friendsStarsSK",
+                "AttributeType": "S"
+              },
+              {
+                "Ref": "AWS::NoValue"
+              }
+            ]
+          },
+          {
+            "Fn::If": [
+              "HasFriendsDistance",
+              {
+                "AttributeName": "friendsDistanceSK",
+                "AttributeType": "S"
+              },
+              {
+                "Ref": "AWS::NoValue"
+              }
+            ]
           }
         ],
         "KeySchema": [
@@ -161,6 +242,54 @@
                 "rankDistance"
               ]
             }
+          },
+          {
+            "Fn::If": [
+              "HasFriendsStars",
+              {
+                "IndexName": "FriendsRankStars",
+                "KeySchema": [
+                  {
+                    "AttributeName": "friendsRankPK",
+                    "KeyType": "HASH"
+                  },
+                  {
+                    "AttributeName": "friendsStarsSK",
+                    "KeyType": "RANGE"
+                  }
+                ],
+                "Projection": {
+                  "ProjectionType": "KEYS_ONLY"
+                }
+              },
+              {
+                "Ref": "AWS::NoValue"
+              }
+            ]
+          },
+          {
+            "Fn::If": [
+              "HasFriendsDistance",
+              {
+                "IndexName": "FriendsRankDistance",
+                "KeySchema": [
+                  {
+                    "AttributeName": "friendsRankPK",
+                    "KeyType": "HASH"
+                  },
+                  {
+                    "AttributeName": "friendsDistanceSK",
+                    "KeyType": "RANGE"
+                  }
+                ],
+                "Projection": {
+                  "ProjectionType": "KEYS_ONLY"
+                }
+              },
+              {
+                "Ref": "AWS::NoValue"
+              }
+            ]
           }
         ],
         "StreamSpecification": {
@@ -282,6 +411,166 @@
             ]
           },
           "Format": "{\"requestId\":\"$context.requestId\",\"route\":\"$context.routeKey\",\"status\":\"$context.status\"}"
+        }
+      }
+    },
+    "FriendsRankLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Condition": "HasFriendsDistance",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/yalla-${Environment}-friends-ranking"
+        },
+        "RetentionInDays": 30
+      }
+    },
+    "FriendsRankRole": {
+      "Type": "AWS::IAM::Role",
+      "Condition": "HasFriendsDistance",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "FriendsRank",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${FriendsRankLogs.Arn}:*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "dynamodb:Query",
+                  "Resource": [
+                    {
+                      "Fn::Sub": "${PlayerTable.Arn}/index/FriendsRankStars"
+                    },
+                    {
+                      "Fn::Sub": "${PlayerTable.Arn}/index/FriendsRankDistance"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:GetItem",
+                    "dynamodb:PutItem"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "PlayerTable",
+                      "Arn"
+                    ]
+                  },
+                  "Condition": {
+                    "ForAllValues:StringEquals": {
+                      "dynamodb:LeadingKeys": [
+                        "RANKING#FRIENDS"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "FriendsRankFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Condition": "HasFriendsDistance",
+      "DependsOn": "FriendsRankLogs",
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "yalla-${Environment}-friends-ranking"
+        },
+        "Runtime": "nodejs24.x",
+        "Architectures": [
+          "arm64"
+        ],
+        "Handler": "dist/friends-ranking.handler",
+        "MemorySize": 256,
+        "Timeout": 60,
+        "Role": {
+          "Fn::GetAtt": [
+            "FriendsRankRole",
+            "Arn"
+          ]
+        },
+        "Code": {
+          "S3Bucket": {
+            "Ref": "ArtifactBucket"
+          },
+          "S3Key": {
+            "Ref": "ArtifactKey"
+          }
+        },
+        "Environment": {
+          "Variables": {
+            "PLAYER_TABLE": {
+              "Ref": "PlayerTable"
+            }
+          }
+        }
+      }
+    },
+    "FriendsRankRule": {
+      "Type": "AWS::Events::Rule",
+      "Condition": "HasFriendsDistance",
+      "Properties": {
+        "ScheduleExpression": "cron(0 0 * * ? *)",
+        "State": {
+          "Fn::If": [
+            "FriendsRankScheduleOn",
+            "ENABLED",
+            "DISABLED"
+          ]
+        },
+        "Targets": [
+          {
+            "Id": "friends-ranking",
+            "Arn": {
+              "Fn::GetAtt": [
+                "FriendsRankFunction",
+                "Arn"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "FriendsRankPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Condition": "HasFriendsDistance",
+      "Properties": {
+        "FunctionName": {
+          "Ref": "FriendsRankFunction"
+        },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "events.amazonaws.com",
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "FriendsRankRule",
+            "Arn"
+          ]
         }
       }
     },
@@ -725,6 +1014,23 @@
                 },
                 {
                   "Effect": "Allow",
+                  "Action": "dynamodb:BatchGetItem",
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "PlayerTable",
+                      "Arn"
+                    ]
+                  },
+                  "Condition": {
+                    "ForAllValues:StringLike": {
+                      "dynamodb:LeadingKeys": [
+                        "PLAYER#*"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
                   "Action": [
                     "dynamodb:PutItem"
                   ],
@@ -1056,6 +1362,33 @@
           "Ref": "Api"
         },
         "RouteKey": "GET /players/me",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "ProfileAvatarRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "POST /players/me/avatar",
         "Target": {
           "Fn::Join": [
             "/",
@@ -2007,6 +2340,26 @@
           "Ref": "Api"
         },
         "RouteKey": "GET /friends/rank",
+        "Target": {
+          "Fn::Sub": "integrations/${PlayerIntegration}"
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "FriendsCumulativeRankRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Condition": "IsDev",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /friends/ranking",
         "Target": {
           "Fn::Sub": "integrations/${PlayerIntegration}"
         },

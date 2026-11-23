@@ -46,6 +46,54 @@ All Friends routes require a Cognito access token. List routes accept optional `
 
 A damaged building with a positive repair cost can receive HELP once per damage cycle, regardless of the age of the attack. HELP reduces the YP repair cost by 1–30% and costs one Clover. The discount and usage marker stay on the damaged building through subsequent attacks. A completed owner repair clears the marker, and a new attack after that repair starts a new cycle. The list, visit view and HELP command use the current Village damage state. Activity records retain the time the help or thanks occurred.
 
+## Cumulative FRIENDS RANK
+
+`GET /friends/ranking?scope=friends|global` is a DEV JWT route. Each entry includes
+`playerId`, `nickname`, `avatarId`, `stars`, `distanceMeters`, `me` and
+`ranks: { stars, distance }`. The top-level `me` contains the caller's positions.
+Scores are decimal strings. A null rank is displayed as an em dash. Clients filter
+the combined response to rows ranked for the active metric. The weekly
+`GET /friends/rank` route remains available to existing clients.
+
+Friends ranking batches the accepted human friends and caller's current PROGRESS
+and PROFILE. Unity caches each friends response for five minutes per account,
+invalidates it after accepting or removing a friend, and also drops it when the
+FRIEND list reveals a membership change. Changing metric reuses the cached response.
+The server reads the authoritative PROGRESS records on each friends API request.
+
+Global ranking uses the two sparse GSIs on PROGRESS, with two bounded descending
+queries of 100 entries each. Primary ties sort by the other cumulative metric,
+then by descending Player ID. The worker publishes a single conditional snapshot
+for both metrics at 00:00 UTC and keeps the previous snapshot if a query or write
+fails. A missing snapshot returns an empty preparing state. The global response
+has a rank for the caller only when the active metric's snapshot contains the caller.
+The public CARAVAN ranking routes and score formulas are independent.
+
+Distance uses the existing cumulative `distance` checkpoint and stars use the
+existing `constructionStars` counter, increased by each paid building upgrade.
+Neither metric changes its write cadence. Only the derived composite index keys
+are added to the existing progress writes.
+
+### DEV rollout order
+
+1. Package the same build for **all progress writers** (Player, Auth and Incoming)
+   so subsequent writes maintain the new index keys. Preserve the existing bot
+   configuration during rollout.
+2. Update the stack with `FriendsRankIndexes=stars` and
+   `FriendsRankSchedule=disabled`. Wait until the stars GSI is ACTIVE.
+3. Update with `FriendsRankIndexes=both`, keeping the schedule disabled. Wait
+   until the distance GSI is ACTIVE. DynamoDB stages the two index additions
+   separately.
+4. Run `npm run build`, then
+   `AWS_PROFILE=yalla-dev node scripts/backfill-friends-ranking.mjs <DEV PlayerTable>`.
+   This queries the existing JourneyRead PROGRESS partition and writes only
+   the new metadata. If any legacy PROGRESS rows lack JourneyRead metadata,
+   run the existing JourneyRead metadata backfill first.
+5. After the new keys have propagated to both GSIs, invoke
+   `yalla-dev-friends-ranking` (empty event) to seed the first snapshot. Verify
+   both API scopes, then set `FriendsRankSchedule=enabled` with the indexes
+   still set to `both`. Keep the schedule disabled until bootstrap succeeds.
+
 ## Ranking and notifications
 
 The Friends ranking reads the existing period score function, which sums settled distance deltas across all eligible rounds. It applies the DEV weekly window and includes zero-distance members. Friend membership is read from the current relationship projections. Ties are sorted by stable participant ID. Bots have zero distance until the shared ranking source contains a score for the bot.

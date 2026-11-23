@@ -1,10 +1,11 @@
 import { randomInt, randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { recharge } from './drop-economy.js';
 import type { FriendsStore, Item, Key } from './friends-store.js';
 import type { ConfigSource } from './game-config.js';
 import { activityPartition, journeyReadKeys } from './journey-read-keys.js';
 import { currentVillageDamage, type Progress } from './model.js';
-import { ApiError, decodeProgress, encodeProgress, playerKey } from './repository.js';
+import { ApiError, decodeProgress, decodeWallet, encodeProgress, encodeWallet, playerKey } from './repository.js';
 import { canHelpDamage, loadWorldCatalog, villageRepairCost, type WorldCatalog } from './world-config.js';
 
 const eventInput = z.strictObject({ eventId: z.uuid() });
@@ -77,17 +78,24 @@ export class FriendHelpService {
     return { world, levels: progress.facilityLevels, worldRunId: progress.worldRunId, village: progress.village, repairs };
   }
 
+  async clover(player: string) {
+    const row = await this.store.get(playerKey(player, 'FRIEND_HELP_CLOVER'));
+    const now = this.clock();
+    return { clover: cloverState(row, now), serverTime: new Date(now).toISOString() };
+  }
+
   private async visit(player: string, targetId: string) {
     const target = await this.target(player, targetId);
-    const now = this.clock();
-    const [village, friend, row] = await Promise.all([this.village(target.progress), this.party(targetId),
-      this.store.get(playerKey(player, 'FRIEND_HELP_CLOVER'))]);
-    return { ...village, friend, clover: cloverState(row, now), serverTime: new Date(now).toISOString() };
+    const [village, friend, balance, costume] = await Promise.all([this.village(target.progress), this.party(targetId),
+      this.clover(player), this.store.get(playerKey(targetId, 'COSTUME'))]);
+    return { ...village, friend, equippedCostume: costume?.equipped ?? {}, ...balance };
   }
 
   private async help(player: string, {targetId, requestId}: z.infer<typeof helpInput>) {
     const receiptKey = playerKey(player, `FRIEND_HELP_REQUEST#${requestId}`);
     const cloverKey = playerKey(player, 'FRIEND_HELP_CLOVER');
+    const walletKey = playerKey(player, 'WALLET');
+    let percent: number | undefined;
     for (let attempt = 0; attempt < 5; attempt++) {
       const receipt = await this.store.get(receiptKey);
       if (receipt) {
@@ -97,8 +105,8 @@ export class FriendHelpService {
       const target = await this.target(player, targetId);
       const { progress } = target;
       const now = this.clock(), occurredAt = new Date(now).toISOString();
-      const [village, row, sender] = await Promise.all([
-        this.village(progress), this.store.get(cloverKey), this.party(player),
+      const [village, row, sender, storedWallet] = await Promise.all([
+        this.village(progress), this.store.get(cloverKey), this.party(player), this.store.get(walletKey),
       ]);
       const eligible = village.repairs.filter(repair => repair.eligible);
       const current = cloverState(row, now);
@@ -106,14 +114,20 @@ export class FriendHelpService {
         if (await this.store.get(receiptKey)) continue;
         throw new ApiError(409, eligible.length ? 'NO_CLOVER' : 'NO_HELP_ELIGIBLE_DAMAGE');
       }
+      if (!storedWallet) throw new ApiError(404, 'PLAYER_NOT_FOUND');
       const selected = eligible[this.roll(eligible.length)]!;
-      const percent = this.roll(30) + 1;
+      percent ??= this.roll(30) + 1;
+      const wallet = recharge(decodeWallet(storedWallet), now);
+      const walletVersion = wallet.version++;
+      wallet.energy += percent;
+      if (wallet.energy >= 50) wallet.energyRechargeAnchor = '0';
+      wallet.updatedAt = occurredAt;
       const savedYP = Math.min(selected.cost, Math.max(1, Math.floor(selected.cost * percent / 100)));
       const clover = cloverState({ ...cloverKey, remaining: current.remaining - 1, anchor: current.anchor ?? now }, now);
       const event = { eventId: randomUUID(), type: 'FRIEND_HELP_REPAIR', occurredAt, sender, recipientId: targetId,
         buildingId: selected.buildingId, attackId: selected.attackId, worldRunId: progress.worldRunId, buildingName: selected.name, worldId: progress.worldId, percent, savedYP,
         remainingCost: selected.cost - savedYP, thanked: false };
-      const result = { event, clover, serverTime: occurredAt };
+      const result = { event, clover, serverTime: occurredAt, energyReward: percent };
       const version = progress.version++;
       progress.updatedAt = occurredAt;
       const damage = progress.villageDamage!;
@@ -126,6 +140,7 @@ export class FriendHelpService {
           ...journeyReadKeys(targetId, 'PROGRESS', progress) }, expected: version },
         { item: indexedEvent(targetId, helpPrefix, event), expected: null },
         { item: { ...playerKey(targetId, unreadPrefix + event.eventId), event }, expected: null },
+        { item: { ...walletKey, ...encodeWallet(wallet) }, expected: walletVersion },
         { item: { ...receiptKey, targetId, result }, expected: null },
       ])) return result;
     }

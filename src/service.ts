@@ -10,6 +10,14 @@ export class PlayerService {
     if (!save) throw new Error('Auth link without player');
     return save;
   }
+  async setAvatar(principal: Principal, avatarId: string) {
+    const player = await this.repository.find(principal);
+    if (!player) throw new ApiError(404, 'PLAYER_NOT_FOUND');
+    if (!this.repository.setAvatar) throw new ApiError(503, 'PLAYER_AVATAR_NOT_CONFIGURED');
+    const profile = await this.repository.setAvatar(player, avatarId);
+    if (!profile) throw new ApiError(404, 'PLAYER_NOT_FOUND');
+    return profile;
+  }
   async createGuest(principal: Principal): Promise<{ created: boolean; save: Save }> {
     if (principal.provider !== 'guest') throw new ApiError(403, 'GUEST_REQUIRED');
     const existing = await this.repository.find(principal);
