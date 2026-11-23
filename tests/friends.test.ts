@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { marshall } from '@aws-sdk/util-dynamodb';
 import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_BOTS } from '../src/bots-config.js';
-import { FriendHelpService, cloverState } from '../src/friend-help.js';
+import { FriendHelpService, cloverState, rollRepairDiscount } from '../src/friend-help.js';
 import { parseConfig, type ConfigName } from '../src/game-config.js';
 import { FriendsService } from '../src/friends.js';
 import { DynamoFriendsStore, type FriendsStore, type Item, type Key, type Write } from '../src/friends-store.js';
@@ -124,6 +124,29 @@ async function helpFixture(buildingCount = 2) {
         .sort((x,y) => y.journeySK.localeCompare(x.journeySK)).slice(0, limit) }) }, 7);
   return {...f, repair, thanks, visit, unread, activity};
 }
+
+describe('Friend HELP weighted discount', () => {
+  it('assigns each of 100 tickets to the correct band and samples every integer within it', () => {
+    const bands = [
+      [0, 0, 1, 1], [1, 1, 2, 2], [2, 46, 3, 5], [47, 76, 6, 10],
+      [77, 89, 11, 15], [90, 95, 16, 20], [96, 98, 21, 25], [99, 99, 26, 30],
+    ] as const;
+    expect(bands.reduce((total, [first, last]) => total + last - first + 1, 0)).toBe(100);
+    const discounts = new Set<number>();
+    for (const [first, last, min, max] of bands) {
+      for (let ticket = first; ticket <= last; ticket++) {
+        for (let discount = min; discount <= max; discount++) {
+          const roll = vi.fn((limit: number) => limit === 100 ? ticket : discount - min);
+          const result = rollRepairDiscount(roll);
+          expect(result).toBe(discount);
+          discounts.add(result);
+          expect(roll.mock.calls).toEqual(min === max ? [[100]] : [[100], [max - min + 1]]);
+        }
+      }
+    }
+    expect([...discounts]).toEqual(Array.from({ length: 30 }, (_, index) => index + 1));
+  });
+});
 
 describe('Friend help cycle', () => {
   it('atomically pays the same repair roll once, including simultaneous and later retries', async () => {

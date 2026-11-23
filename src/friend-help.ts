@@ -18,6 +18,29 @@ const thanksPrefix = 'FRIEND_HELP_THANKS#';
 const unreadPrefix = 'FRIEND_HELP_UNREAD#';
 const conflict = () => new ApiError(409, 'STATE_CHANGED_RETRY_SAME_REQUEST');
 
+const repairDiscountBands = [
+  { min: 1, max: 1, weight: 1 },
+  { min: 2, max: 2, weight: 1 },
+  { min: 3, max: 5, weight: 45 },
+  { min: 6, max: 10, weight: 30 },
+  { min: 11, max: 15, weight: 13 },
+  { min: 16, max: 20, weight: 6 },
+  { min: 21, max: 25, weight: 3 },
+  { min: 26, max: 30, weight: 1 },
+] as const;
+
+const repairDiscountWeight = repairDiscountBands.reduce((total, band) => total + band.weight, 0);
+if (repairDiscountWeight !== 100) throw new Error('Friend HELP discount weights must sum to 100');
+
+export function rollRepairDiscount(roll: (max: number) => number = randomInt): number {
+  let ticket = roll(repairDiscountWeight);
+  for (const { min, max, weight } of repairDiscountBands) {
+    if (ticket < weight) return min === max ? min : min + roll(max - min + 1);
+    ticket -= weight;
+  }
+  throw new RangeError('Invalid Friend HELP discount roll');
+}
+
 export function cloverState(row: Item | undefined, now: number) {
   const previous = Number(row?.remaining ?? capacity);
   const anchor = typeof row?.anchor === 'number' ? row.anchor : now;
@@ -116,7 +139,7 @@ export class FriendHelpService {
       }
       if (!storedWallet) throw new ApiError(404, 'PLAYER_NOT_FOUND');
       const selected = eligible[this.roll(eligible.length)]!;
-      percent ??= this.roll(30) + 1;
+      percent ??= rollRepairDiscount(this.roll);
       const wallet = recharge(decodeWallet(storedWallet), now);
       const walletVersion = wallet.version++;
       wallet.energy += percent;
