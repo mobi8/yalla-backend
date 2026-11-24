@@ -1,3 +1,4 @@
+import { activityCutoff, activityDisplayUntil, loadActivityPolicy } from './activity-policy.js';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, QueryCommand, type QueryCommandInput } from '@aws-sdk/lib-dynamodb';
 import { z } from 'zod';
@@ -64,7 +65,7 @@ const page = {
 export const rankingQuery = z.strictObject({
   ...page, scope: z.enum(['total', 'period']).default('total'), periodStart: z.iso.datetime().optional(),
 });
-export const activityQuery = z.strictObject(page);
+export const activityQuery = z.strictObject({ ...page, limit: z.coerce.number().int().min(1).optional() });
 type RankingQuery = z.infer<typeof rankingQuery>;
 type ActivityQuery = z.infer<typeof activityQuery>;
 const cursorData = z.tuple([z.string(), z.string().max(500)]);
@@ -92,7 +93,7 @@ type Score = { player: string; order: string; distance: string };
 export class JourneyReadService {
   private cachedPeriod?: { start: string; expires: number; scores: Promise<Score[]> };
   constructor(private players: Pick<PlayerRepository, 'find'>, private store: JourneyReadStore,
-    private days: number, private clock = Date.now) {}
+    private days: number, private clock = Date.now, private activityPolicy = loadActivityPolicy()) {}
 
   private async owner(principal: Principal) {
     const player = await this.players.find(principal);
@@ -200,45 +201,67 @@ export class JourneyReadService {
   async activity(principal: Principal, query: ActivityQuery) {
     const player = await this.owner(principal);
     const partition = activityPartition(player);
-    let scanCursor = before(query.cursor, partition);
-    let nextKey: string | undefined;
-    const records: ({key: string; social: false; event: NonNullable<ReturnType<typeof privateActivity>>} |
-      {key: string; social: true; event: Record<string, unknown>})[] = [];
-    // Retained history can occupy raw index slots, so paginate over accepted events.
-    for (let page = 0; page < 5 && records.length <= query.limit; page++) {
-      const {rows} = await this.store.index({partition,bounds:{before:scanCursor},limit:query.limit+1});
-      const batch = await Promise.all(rows.map(async row => {
-        if (row.PK !== `PLAYER#${player}` || !/^(INCOMING#(?:RECEIPT|WALLET_RAID)#|RAID#|FRIEND_HELP(?:_THANKS)?#)/.test(row.SK)) return;
-        const receipt = await this.store.get(player,row.SK);
-        if (receipt?.recipientId === player && (receipt.type === 'FRIEND_HELP_REPAIR' || receipt.type === 'FRIEND_HELP_THANKS')) {
-          const { PK, SK, version, journeyPK, journeySK, ...event } = receipt;
-          return {key: row.journeySK, event, social: true as const};
-        }
-        const event = receipt && privateActivity(player,row.SK,receipt);
-        if (event) return {key:row.journeySK,event,social: false as const};
-      }));
-      records.push(...batch.filter(record => record !== undefined));
-      scanCursor = rows.at(-1)?.journeySK;
-      nextKey = rows.length > query.limit ? scanCursor : undefined;
-      if (!nextKey) break;
-    }
-    const visible = records.slice(0, query.limit);
+    const cursor = before(query.cursor, partition);
+    const now = this.clock();
+    const policy = this.activityPolicy;
+    const cutoff = activityCutoff(now, policy);
+    // Apply the feed cap before the legacy cursor so pagination stays inside the display window.
+    const { rows } = await this.store.index({
+      partition,
+      bounds: { range: [new Date(cutoff + 1).toISOString(), `${new Date(now).toISOString()}$`] },
+      limit: policy.activityMaxDisplayCount,
+    });
+    const keys = new Set<string>();
+    const candidates = rows.filter(row => {
+      if (row.PK !== `PLAYER#${player}` || keys.has(row.journeySK)) return false;
+      keys.add(row.journeySK);
+      return true;
+    });
+    const limit = query.limit ?? policy.activityMaxDisplayCount;
+    const remaining = candidates.filter(row => !cursor || row.journeySK < cursor);
+    const selected = remaining.slice(0, limit);
+    const batch = await Promise.all(selected.map(async row => {
+      if (!/^(ACTIVITY_FEED#|INCOMING#(?:RECEIPT|WALLET_RAID)#|RAID#|FRIEND_HELP(?:_THANKS)?#)/.test(row.SK)) return;
+      const item = await this.store.get(player, row.SK);
+      if (!item) return;
+      const expiry = typeof item.activityExpiresAt === 'number' ? item.activityExpiresAt : undefined;
+      const displayUntil = (occurredAt: unknown) => activityDisplayUntil(occurredAt, policy, expiry);
+      if (/^FRIEND_HELP(?:_THANKS)?#/.test(row.SK) && item.recipientId === player &&
+          (item.type === 'FRIEND_HELP_REPAIR' || item.type === 'FRIEND_HELP_THANKS')) {
+        const { PK, SK, version, journeyPK, journeySK, activityExpiresAt, ...event } = item;
+        const until = displayUntil(event.occurredAt);
+        if (until > now) return { event, until, social: true as const };
+        return;
+      }
+      const event: ReturnType<typeof privateActivity> = row.SK.startsWith('ACTIVITY_FEED#')
+        ? item.event : privateActivity(player, row.SK, item);
+      if (!event) return;
+      const until = displayUntil(event.occurredAt);
+      if (until > now) return { event, until, social: false as const };
+    }));
+    const visible = batch.filter(record => record !== undefined);
     const senderSchema = z.object({ id: z.uuid(), type: z.literal('PLAYER') }).passthrough();
     const senders = visible.map(record => record.social ? senderSchema.safeParse(record.event.sender).data : undefined);
-    const profiles = await this.profiles([player, ...senders.flatMap(sender => sender ? [sender.id] : [])]);
+    const profiles = await this.profiles([...(visible.some(record => !record.social) ? [player] : []),
+      ...senders.flatMap(sender => sender ? [sender.id] : [])]);
     const named = (party: { id: string; type: string }) => ({
       ...party, nickname: party.type === 'BOT' ? party.id : profiles.get(party.id)?.nickname ?? null,
     });
-    const events = visible.map(({social,event}, index) => {
-      if (!social) return { ...event, attacker: named(event.attacker), defender: named(event.defender) };
+    const events = visible.map<Record<string, unknown>>(({social,event,until}, index) => {
+      const displayUntil = new Date(until).toISOString();
+      if (!social) return { ...event, displayUntil, attacker: named(event.attacker), defender: named(event.defender) };
       const sender = senders[index];
       const profile = sender && profiles.get(sender.id);
       return profile ? {
         ...event,
+        displayUntil,
         sender: { ...sender, nickname: profile.nickname ?? sender.nickname, avatarId: profile.avatarId ?? sender.avatarId },
-      } : event;
+      } : { ...event, displayUntil };
     });
-    return { events, nextCursor: cursorFor(partition, records.length > query.limit ? records[query.limit-1]?.key : nextKey) };
+    return {
+      events, playerId: player, serverTime: new Date(now).toISOString(),
+      nextCursor: cursorFor(partition, remaining.length > limit ? selected.at(-1)?.journeySK : undefined),
+    };
   }
 }
 

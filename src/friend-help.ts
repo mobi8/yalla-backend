@@ -1,3 +1,4 @@
+import { activityExpiry, activityDisplayUntil, loadActivityPolicy, type ActivityPolicy } from './activity-policy.js';
 import { randomInt, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { recharge } from './drop-economy.js';
@@ -50,14 +51,14 @@ export function cloverState(row: Record<string, unknown> | undefined, now: numbe
   return { remaining, capacity, anchor: nextAnchor, nextAt: nextAnchor === null ? null : new Date(nextAnchor + interval).toISOString() };
 }
 
-function indexedEvent(player: string, prefix: string, event: {eventId: string; occurredAt: string} & Record<string, unknown>): Item {
+function indexedEvent(player: string, prefix: string, event: {eventId: string; occurredAt: string} & Record<string, unknown>, policy: ActivityPolicy): Item {
   const key = playerKey(player, prefix + event.eventId);
-  return { ...key, ...event, version: 1, journeyPK: activityPartition(player), journeySK: `${event.occurredAt}#${event.eventId}#${key.SK}` };
+  return { ...key, ...event, version: 1, activityExpiresAt: activityExpiry(event.occurredAt, policy), journeyPK: activityPartition(player), journeySK: `${event.occurredAt}#${event.eventId}#${key.SK}` };
 }
 
 export class FriendHelpService {
   constructor(private store: FriendsStore, private configs: ConfigSource, private clock = Date.now,
-    private roll = randomInt) {}
+    private roll = randomInt, private activityPolicy = loadActivityPolicy()) {}
 
   private async party(id: string) {
     const profile = await this.store.get(playerKey(id, 'PROFILE'));
@@ -161,7 +162,7 @@ export class FriendHelpService {
           expected: row ? Number(row.version) : null },
         { item: { ...playerKey(targetId, 'PROGRESS'), ...encodeProgress(progress),
           ...journeyReadKeys(targetId, 'PROGRESS', progress) }, expected: version },
-        { item: indexedEvent(targetId, helpPrefix, event), expected: null },
+        { item: indexedEvent(targetId, helpPrefix, event, this.activityPolicy), expected: null },
         { item: { ...playerKey(targetId, unreadPrefix + event.eventId), event }, expected: null },
         { item: { ...walletKey, ...encodeWallet(wallet) }, expected: walletVersion },
         { item: { ...receiptKey, targetId, result }, expected: null },
@@ -176,14 +177,20 @@ export class FriendHelpService {
       const source = await this.store.get(sourceKey);
       if (source?.type !== 'FRIEND_HELP_REPAIR' || source.recipientId !== player)
         throw new ApiError(404, 'HELP_EVENT_NOT_FOUND');
+      const now = this.clock();
+      const expiry = typeof source.activityExpiresAt === 'number' ? source.activityExpiresAt : undefined;
+      if (typeof source.occurredAt !== 'string' || Date.parse(source.occurredAt) > now ||
+          !(activityDisplayUntil(source.occurredAt, this.activityPolicy, expiry) > now))
+        throw new ApiError(409, 'HELP_EVENT_EXPIRED');
       if (source.thanked === true) return { thanked: true };
       const helperId = (source.sender as {id: string}).id;
       const event = { eventId: `thanks:${eventId}`, originalHelpEventId: eventId, type: 'FRIEND_HELP_THANKS',
-        occurredAt: new Date(this.clock()).toISOString(), sender: await this.party(player),
+        occurredAt: new Date(now).toISOString(), sender: await this.party(player),
         recipientId: helperId, message: 'Thanks for helping my Village!' };
       if (await this.store.commit([
-        { item: { ...source, thanked: true, version: Number(source.version) + 1 }, expected: Number(source.version) },
-        { item: indexedEvent(helperId, thanksPrefix, event), expected: null },
+        { item: { ...source, activityExpiresAt: source.activityExpiresAt ?? activityExpiry(source.occurredAt, this.activityPolicy),
+          thanked: true, version: Number(source.version) + 1 }, expected: Number(source.version) },
+        { item: indexedEvent(helperId, thanksPrefix, event, this.activityPolicy), expected: null },
       ])) return { thanked: true };
     }
     throw conflict();

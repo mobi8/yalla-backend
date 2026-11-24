@@ -22,6 +22,24 @@
       "MinValue": 1,
       "MaxValue": 31
     },
+    "ActivityDisplayHours": {
+      "Type": "Number",
+      "Default": 24,
+      "MinValue": 1,
+      "MaxValue": 87600
+    },
+    "ActivityMaxDisplayCount": {
+      "Type": "Number",
+      "Default": 50,
+      "MinValue": 1,
+      "MaxValue": 100
+    },
+    "ActivityRetentionDays": {
+      "Type": "Number",
+      "Default": 30,
+      "MinValue": 1,
+      "MaxValue": 3650
+    },
     "FriendsRankIndexes": {
       "Type": "String",
       "Default": "none",
@@ -292,6 +310,10 @@
             ]
           }
         ],
+        "TimeToLiveSpecification": {
+          "AttributeName": "activityExpiresAt",
+          "Enabled": true
+        },
         "StreamSpecification": {
           "StreamViewType": "NEW_AND_OLD_IMAGES"
         },
@@ -687,6 +709,15 @@
         },
         "Environment": {
           "Variables": {
+            "ACTIVITY_DISPLAY_HOURS": {
+              "Ref": "ActivityDisplayHours"
+            },
+            "ACTIVITY_MAX_DISPLAY_COUNT": {
+              "Ref": "ActivityMaxDisplayCount"
+            },
+            "ACTIVITY_RETENTION_DAYS": {
+              "Ref": "ActivityRetentionDays"
+            },
             "PLAYER_TABLE": {
               "Ref": "PlayerTable"
             },
@@ -1173,6 +1204,15 @@
         },
         "Environment": {
           "Variables": {
+            "ACTIVITY_DISPLAY_HOURS": {
+              "Ref": "ActivityDisplayHours"
+            },
+            "ACTIVITY_MAX_DISPLAY_COUNT": {
+              "Ref": "ActivityMaxDisplayCount"
+            },
+            "ACTIVITY_RETENTION_DAYS": {
+              "Ref": "ActivityRetentionDays"
+            },
             "PLAYER_TABLE": {
               "Ref": "PlayerTable"
             },

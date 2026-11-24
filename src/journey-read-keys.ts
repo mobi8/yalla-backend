@@ -1,3 +1,4 @@
+import { activityExpiry, type ActivityPolicy } from './activity-policy.js';
 import { decimalString, longString } from './model.js';
 import { scaled } from './drop-economy.js';
 
@@ -67,7 +68,17 @@ export function friendRankKeys(distance: string, stars: string, player: string) 
     friendsDistanceSK: `${metersKey}#${starsKey}#${player}` };
 }
 
-export function journeyReadKeys(player: string, sk: string, value: Stored) {
+export function activityFeedItem(player: string, sourceKey: string, value: Stored, policy: ActivityPolicy) {
+  const event = privateActivity(player, sourceKey, value);
+  if (!event) return;
+  return {
+    PK: `PLAYER#${player}`, SK: `ACTIVITY_FEED#${sourceKey}`, event,
+    journeyPK: activityPartition(player), journeySK: `${event.occurredAt}#${event.eventId}#${sourceKey}`,
+    activityExpiresAt: activityExpiry(event.occurredAt, policy),
+  };
+}
+
+export function journeyReadKeys(player: string, sk: string, value: Stored, indexLegacyActivity = true) {
   if (sk === 'PROGRESS' && decimalString.safeParse(value.distance).success)
     return { journeyPK: totalPartition, journeySK: distanceOrder(value.distance, player), rankDistance: value.distance,
       ...(longString.safeParse(value.constructionStars).success ? friendRankKeys(value.distance, value.constructionStars, player) : {}) };
@@ -77,7 +88,7 @@ export function journeyReadKeys(player: string, sk: string, value: Stored) {
     if (when && distance.success && scaled(distance.data) > 0n)
       return { journeyPK: deltaPartition, journeySK: `${when}#${player}#${sk}`, rankDistance: distance.data };
   }
-  const event = privateActivity(player, sk, value);
+  const event = indexLegacyActivity ? privateActivity(player, sk, value) : undefined;
   if (event) return { journeyPK: activityPartition(player), journeySK: `${event.occurredAt}#${event.eventId}#${sk}` };
   return {};
 }

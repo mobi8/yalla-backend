@@ -1,16 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
-import { TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { QueryCommand, TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { DynamoDropStore } from '../src/drop.js';
 import { DynamoIncomingStore } from '../src/incoming-raid.js';
 import { createHandler, type HttpEvent } from '../src/handler.js';
-import { JourneyReadService, rankingPeriod, type JourneyReadStore } from '../src/journey-read.js';
-import { journeyReadKeys, privateActivity } from '../src/journey-read-keys.js';
+import { DynamoJourneyReadStore, JourneyReadService, rankingPeriod, type JourneyReadStore } from '../src/journey-read.js';
+import { activityFeedItem, journeyReadKeys, privateActivity } from '../src/journey-read-keys.js';
 import { newSave, type Principal } from '../src/model.js';
 import type { PlayerService } from '../src/service.js';
 
+import { loadActivityPolicy, type ActivityPolicy } from '../src/activity-policy.js';
+
 const now = Date.parse('2026-11-19T12:00:00.000Z');
 const signedIn = (subject:string):Principal => ({ provider:'guest', subject });
-function fixture() {
+function fixture(policy = loadActivityPolicy(), clock = () => now) {
   const first = newSave(), second = newSave(), third = newSave();
   const [a,b,c] = [first,second,third].map(save=>save.profile.playerId) as [string,string,string];
   const items = new Map<string,Record<string,any>>();
@@ -34,7 +36,7 @@ function fixture() {
       }))};
     },
   };
-  const read = new JourneyReadService({find:async p=>[a,b,c].includes(p.subject)?p.subject:undefined},store,1,()=>now);
+  const read = new JourneyReadService({find:async p=>[a,b,c].includes(p.subject)?p.subject:undefined},store,1,clock,policy);
   return {a,b,c,put,read};
 }
 const attack = (player:string, sequence:number, outcome:'HIT'|'BLOCKED', occurredAt = '2026-11-19T10:00:00Z') => ({
@@ -137,10 +139,81 @@ describe('Journey read APIs',()=>{
     await incoming.commit(a,[{sk:'INCOMING#SCHEDULE',value:{sequence:2},expectedVersion:1},
       {sk:'INCOMING#RECEIPT#0001',value:attack(a,1,'BLOCKED')}]);
     const attackWrites=send.mock.calls[1]![0].input.TransactItems!;
-    expect(attackWrites[1]!.Put!.Item).toMatchObject({journeyPK:`FEED#${a}`,eventId:`ATTACK:${a}:1`});
+    expect(attackWrites[1]!.Put!.Item).toMatchObject({eventId:`ATTACK:${a}:1`});
+    expect(attackWrites[1]!.Put!.Item).not.toHaveProperty('activityExpiresAt');
+    expect(attackWrites[2]!.Put!.Item).toMatchObject({
+      SK:'ACTIVITY_FEED#INCOMING#RECEIPT#0001', journeyPK:`FEED#${a}`, event:{eventId:`ATTACK:${a}:1`},
+      activityExpiresAt:Date.parse('2026-12-19T10:00:00Z') / 1000,
+    });
     expect(attackWrites[1]!.Put!.ConditionExpression).toBe('attribute_not_exists(PK)');
     expect(send).toHaveBeenCalledTimes(2);
   });
+  it('uses rolling millisecond boundaries across UTC midnight and applies configurable limits', async () => {
+    let time = Date.parse('2026-11-19T00:00:01.000Z');
+    const policy: ActivityPolicy = {activityDisplayHours:24, activityMaxDisplayCount:50, activityRetentionDays:30};
+    const {a,put,read} = fixture(policy, () => time);
+    const add = (sequence: number, offset: number) => put(a, `INCOMING#RECEIPT#${sequence}`,
+      attack(a,sequence,'HIT',new Date(time + offset).toISOString()));
+    add(1, -86400000);
+    add(2, -86400000 + 1);
+    add(3, -2000);
+    add(4, 0);
+    add(5, 1);
+    const ids = (events: {eventId?: unknown}[]) => events.map(event => event.eventId);
+    const eventId = (sequence: number) => `ATTACK:${a}:${sequence}`;
+    expect(ids((await read.activity(signedIn(a),{})).events)).toEqual([4,3,2].map(eventId));
+    time++;
+    expect(ids((await read.activity(signedIn(a),{})).events)).toEqual([5,4,3].map(eventId));
+    for (let n=6; n<=61; n++) add(n, -1000 - n);
+    const result = await read.activity(signedIn(a),{});
+    expect(result.events).toHaveLength(50);
+    expect(result.nextCursor).toBeNull();
+    const first = await read.activity(signedIn(a),{limit:49});
+    const last = await read.activity(signedIn(a),{limit:49,cursor:first.nextCursor!});
+    expect(last.events).toEqual(result.events.slice(49));
+    expect(last.nextCursor).toBeNull();
+    policy.activityDisplayHours = 1;
+    policy.activityMaxDisplayCount = 2;
+    policy.activityRetentionDays = 2;
+    add(62, -3600000);
+    expect(ids((await read.activity(signedIn(a),{})).events)).toEqual([5,4].map(eventId));
+    policy.activityMaxDisplayCount = 100;
+    expect(ids((await read.activity(signedIn(a),{})).events)).not.toContain(eventId(62));
+    const feed = activityFeedItem(a,'INCOMING#RECEIPT#1',attack(a,1,'HIT'),policy);
+    expect(feed?.activityExpiresAt).toBe(Date.parse('2026-11-21T10:00:00Z') / 1000);
+  });
+
+  it('reads the isolated feed projection and ignores logically expired items before DynamoDB deletes them', async () => {
+    const policy = {activityDisplayHours:72, activityMaxDisplayCount:50, activityRetentionDays:30};
+    const shortRetention = { ...policy, activityRetentionDays:1 };
+    const {a,put,read} = fixture(policy);
+    const insert = (sequence: number, occurredAt: string) => {
+      const key = `INCOMING#RECEIPT#${sequence}`;
+      const feed = activityFeedItem(a, key, attack(a,sequence,'BLOCKED',occurredAt), shortRetention)!;
+      put(a, feed.SK, feed);
+    };
+    insert(1, '2026-11-18T12:00:00.000Z');
+    insert(2, '2026-11-18T12:00:00.001Z');
+    const result = await read.activity(signedIn(a),{});
+    expect(result.events).toMatchObject([{
+      eventId: `ATTACK:${a}:2`, outcome: 'BLOCKED', displayUntil: '2026-11-19T12:00:01.000Z',
+    }]);
+    expect(result.events[0]).not.toHaveProperty('activityExpiresAt');
+  });
+
+  it('bounds the existing descending GSI Query and skips hydration for an empty window', async () => {
+    const send = vi.fn(async (_command: QueryCommand) => ({ Items: [], Count: 0 }));
+    const store = new DynamoJourneyReadStore({send} as unknown as DynamoDBDocumentClient, 'table');
+    const read = new JourneyReadService({find: async () => 'viewer'}, store, 1, () => now);
+    expect((await read.activity(signedIn('viewer'), {})).events).toEqual([]);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0]![0].input).toMatchObject({
+      IndexName: 'JourneyRead', KeyConditionExpression: 'journeyPK = :pk AND journeySK BETWEEN :low AND :high',
+      ExpressionAttributeValues: { ':pk': 'FEED#viewer', ':low': '2026-11-18T12:00:00.001Z',
+        ':high': '2026-11-19T12:00:00.000Z$' }, ScanIndexForward: false, Limit: 50,
+    });
+  });
+
   it('requires auth and rejects client supplied player IDs at the HTTP boundary',async()=>{
     const {a,read}=fixture();
     const request:HttpEvent = {rawPath:'/players/me/activity',requestContext:{http:{method:'GET'}}};

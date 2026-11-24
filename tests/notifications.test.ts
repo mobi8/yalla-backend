@@ -53,7 +53,7 @@ describe('notification hub',()=>{
     expect(publish).not.toHaveBeenCalled();
   });
 
-  it('pages across retained history and returns the three supported outcomes',async()=>{
+  it('queries around retained history and returns the three supported outcomes',async()=>{
     const {JourneyReadService,rankingPeriod}=await import('../src/journey-read.js');
     expect(rankingPeriod(Date.parse(when),7).startsAt).toBe('2026-11-16T00:00:00.000Z');
     const PK='PLAYER#'+player;
@@ -63,11 +63,13 @@ describe('notification hub',()=>{
       {SK:'INCOMING#RECEIPT#0001',journeySK:'4',actorId:'player_1001',timestamp:when,outcome:'HIT',buildingId:'building-1'},
       {SK:'INCOMING#RECEIPT#0002',journeySK:'3',actorId:'player_1001',timestamp:when,outcome:'BLOCKED',shieldConsumed:true},
       {SK:raidKey,journeySK:'2',...raid},
-    ].map(row=>({...row,PK}));
+    ].map(row=>({...row,PK,journeySK: `${new Date(Date.parse(when) -
+      (row.SK.startsWith('ACTIVITY#') ? 25 * 3600 * 1000 : 0)).toISOString()}#${row.journeySK}`}))
+      .sort((a,b)=>b.journeySK.localeCompare(a.journeySK));
     const service=new JourneyReadService({find:async()=>player},{
       get:async(_id,sk)=>items.find(row=>row.SK===sk),
-      index:async({bounds,limit})=>({rows:items.filter(row=>!bounds?.before||row.journeySK<bounds.before).slice(0,limit),count:0}),
-    },7);
+      index:async({bounds,limit})=>({rows:items.filter(row=>!bounds?.range||row.journeySK>=bounds.range[0]&&row.journeySK<=bounds.range[1]).slice(0,limit),count:0}),
+    },7,()=>Date.parse(when));
     const principal={provider:'guest' as const,subject:'viewer'};
     const first=await service.activity(principal,{limit:1});
     expect(first.events.map(e=>e.outcome)).toEqual(['HIT']);

@@ -29,6 +29,14 @@ storage['Resources']['ArtifactTransportPolicy'] = {"Type": "AWS::S3::BucketPolic
 parameters = {"Environment": {"Type": "String", "AllowedValues": ["dev", "staging", "prod"], "Default": "dev"},
               "ArtifactBucket": {"Type": "String"}, "ArtifactKey": {"Type": "String"},
               "RankingPeriodDays": {"Type": "Number", "Default": 1, "MinValue": 1, "MaxValue": 31}}
+activity_config = {
+    "ActivityDisplayHours": ("ACTIVITY_DISPLAY_HOURS", 24, 87600),
+    "ActivityMaxDisplayCount": ("ACTIVITY_MAX_DISPLAY_COUNT", 50, 100),
+    "ActivityRetentionDays": ("ACTIVITY_RETENTION_DAYS", 30, 3650),
+}
+for name, (_, default, maximum) in activity_config.items():
+    parameters[name] = {"Type": "Number", "Default": default, "MinValue": 1, "MaxValue": maximum}
+activity_env = {env: ref(name) for name, (env, _, _) in activity_config.items()}
 resources = {
     "PlayerTable": {"Type": "AWS::DynamoDB::Table", **retain, "Properties": {
         "BillingMode": "PAY_PER_REQUEST", "AttributeDefinitions": [{"AttributeName": k, "AttributeType": "S"} for k in ["PK", "SK", "duePartition", "dueAt", "activityPartition", "lastActiveAt", "journeyPK", "journeySK"]],
@@ -38,6 +46,7 @@ resources = {
              "Projection": {"ProjectionType": "KEYS_ONLY"}},
             {"IndexName": "JourneyRead", "KeySchema": [{"AttributeName": "journeyPK", "KeyType": "HASH"}, {"AttributeName": "journeySK", "KeyType": "RANGE"}],
              "Projection": {"ProjectionType": "INCLUDE", "NonKeyAttributes": ["rankDistance"]}}],
+        "TimeToLiveSpecification": {"AttributeName": "activityExpiresAt", "Enabled": True},
         "StreamSpecification": {"StreamViewType": "NEW_AND_OLD_IMAGES"},
         "PointInTimeRecoverySpecification": {"PointInTimeRecoveryEnabled": True},
         "SSESpecification": {"SSEEnabled": True},
@@ -115,7 +124,7 @@ resources["IncomingFunction"] = {"Type":"AWS::Lambda::Function","DependsOn":"Inc
     "FunctionName":sub("yalla-${Environment}-incoming-raid"),"Runtime":"nodejs24.x","Architectures":["arm64"],
     "Handler":"dist/incoming-raid.handler","MemorySize":256,"Timeout":300,"Role":arn("IncomingRole"),
     "Code":{"S3Bucket":ref("ArtifactBucket"),"S3Key":ref("ArtifactKey")},
-    "Environment":{"Variables":{"PLAYER_TABLE":ref("PlayerTable"),"GAME_CONFIG_BUCKET":"yalla-result-pools-533266967583","ENVIRONMENT":ref("Environment")}}}}
+    "Environment":{"Variables":{**activity_env,"PLAYER_TABLE":ref("PlayerTable"),"GAME_CONFIG_BUCKET":"yalla-result-pools-533266967583","ENVIRONMENT":ref("Environment")}}}}
 resources["IncomingRule"] = {"Type":"AWS::Events::Rule","Properties":{"ScheduleExpression":{"Fn::If":["IsDev",dev_schedule,"rate(5 minutes)"]},"State":"ENABLED","Targets":[{"Id":"incoming-raid","Arn":arn("IncomingFunction")}]}}
 resources["IncomingPermission"] = {"Type":"AWS::Lambda::Permission","Properties":{"FunctionName":ref("IncomingFunction"),"Action":"lambda:InvokeFunction","Principal":"events.amazonaws.com","SourceArn":arn("IncomingRule")}}
 for prefix in ["Auth", "Player"]:
@@ -153,7 +162,7 @@ for prefix in ["Auth", "Player"]:
         "FunctionName": sub("yalla-${Environment}-" + prefix.lower()), "Runtime": "nodejs24.x", "Architectures": ["arm64"],
         "Handler": "dist/handler.handler", "MemorySize": 256, "Timeout": 20, "Role": arn(prefix + "Role"),
         "Code": {"S3Bucket": ref("ArtifactBucket"), "S3Key": ref("ArtifactKey")},
-        "Environment": {"Variables": {"PLAYER_TABLE": ref("PlayerTable"), "USER_POOL_ID": ref("UserPool"),
+        "Environment": {"Variables": {**(activity_env if prefix == "Player" else {}), "PLAYER_TABLE": ref("PlayerTable"), "USER_POOL_ID": ref("UserPool"),
             "USER_POOL_CLIENT_ID": ref("UserPoolClient"), "ENVIRONMENT": ref("Environment"), "RANKING_PERIOD_DAYS": ref("RankingPeriodDays"), "RESULT_POLICY": "PERMISSIVE",
             "GAME_CONFIG_BUCKET": "yalla-result-pools-533266967583", "RESULT_POOL_BUCKET": "yalla-result-pools-533266967583", "RESULT_POOL_PREFIX": "result-pools/v1/",
             "PHYSICS_VERSION": "fixed-fresh-round-v1", "COGNITO_ISSUER": sub("https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}")}},

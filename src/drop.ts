@@ -1,13 +1,14 @@
+import { loadActivityPolicy } from './activity-policy.js';
 import { BingoMission } from './bingo.js';
 import type { BingoEvent } from './bingo-config.js';
 import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand, QueryCommand, NumberValue } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand, type TransactWriteCommandInput, QueryCommand, NumberValue } from '@aws-sdk/lib-dynamodb';
 import { z } from 'zod';
 import { GameConfigs, type ConfigSource, type GameConfig } from './game-config.js';
 import { ApiError, createDynamoRepository, playerKey, type PlayerRepository } from './repository.js';
 import type { Principal, Save, Wallet, Progress } from './model.js';
-import { journeyReadKeys, withoutJourneyKeys } from './journey-read-keys.js';
+import { activityFeedItem, journeyReadKeys, withoutJourneyKeys } from './journey-read-keys.js';
 import { ResultPools, color, outcomeSchema, type AssignedSet, type Outcome, type PoolSource } from './pools.js';
 import { collectionSchema, newCollection, recharge, settle, multiplier, type Collection } from './drop-economy.js';
 export const requestId = z.string().uuid();
@@ -24,7 +25,7 @@ type Item = Record<string, any>;
 export interface Write { sk: string; value: Item; expectedVersion?: number; delete?: true }
 export interface DropStore { get(player: string, sk: string): Promise<Item | undefined>; commit(player: string, writes: Write[]): Promise<void> }
 export class DynamoDropStore implements DropStore {
-  constructor(private client: DynamoDBDocumentClient, private table: string) {}
+  constructor(private client: DynamoDBDocumentClient, private table: string, private activityPolicy = loadActivityPolicy()) {}
   async get(player: string, sk: string) {
     const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: playerKey(player, sk), ConsistentRead: true }));
     if (!Item) return undefined; const { PK, SK, ...value } = Item; return withoutJourneyKeys(value);
@@ -41,15 +42,19 @@ export class DynamoDropStore implements DropStore {
     return items;
   }
   async commit(player: string, writes: Write[]) {
-    await this.client.send(new TransactWriteCommand({ TransactItems: writes.map(w => {
+    await this.client.send(new TransactWriteCommand({ TransactItems: writes.flatMap((w): NonNullable<TransactWriteCommandInput['TransactItems']> => {
       const Key = playerKey(player, w.sk);
       const condition = w.expectedVersion === undefined ? { ConditionExpression: 'attribute_not_exists(PK)' } :
         { ConditionExpression: '#v = :v', ExpressionAttributeNames: { '#v': 'version' }, ExpressionAttributeValues: { ':v': w.expectedVersion } };
-      if (w.delete) return { Delete: { TableName: this.table, Key, ...condition } };
-      const value: Item = { ...w.value, ...journeyReadKeys(player, w.sk, w.value) };
+      if (w.delete) return [{ Delete: { TableName: this.table, Key, ...condition } }];
+      const value: Item = { ...w.value, ...journeyReadKeys(player, w.sk, w.value, false) };
       for (const k of w.sk === 'WALLET' ? ['energyRechargeAnchor', 'energyRechargeHighWater'] :
         w.sk === 'PROGRESS' ? ['distance', 'lastDistanceMilestone', 'constructionStars'] : []) value[k] = NumberValue.from(value[k]);
-      return { Put: { TableName: this.table, Item: { ...Key, ...value }, ...condition } };
+      const feed = activityFeedItem(player, w.sk, w.value, this.activityPolicy);
+      return [
+        { Put: { TableName: this.table, Item: { ...Key, ...value }, ...condition } },
+        ...(feed ? [{ Put: { TableName: this.table, Item: feed } }] : []),
+      ];
     }) }));
   }
 }

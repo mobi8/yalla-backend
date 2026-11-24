@@ -89,7 +89,7 @@ function fixture(mint?: () => string, withHelp = false) {
     api(sender,'POST /friends/requests',{}, {code: target,requestId,referral});
   const action = async (player: string, code: string, requestId: string, action: string) =>
     api(player,'POST /friends/actions',{}, {code,requestId,action});
-  return { store, service, api, send, action, distances, tick: (ms:number) => {now += ms;} };
+  return { store, service, api, send, action, distances, clock: () => now, tick: (ms:number) => {now += ms;} };
 }
 
 async function helpFixture(buildingCount = 2) {
@@ -119,9 +119,9 @@ async function helpFixture(buildingCount = 2) {
     { get: (id, sk) => f.store.get(playerKey(id, sk)),
       index: async ({partition,bounds,limit}) => ({count: 0, rows: [...f.store.rows.values()]
         .flatMap(row => typeof row.journeySK === 'string' && row.journeyPK === partition &&
-          (!bounds?.before || row.journeySK < bounds.before)
+          (!bounds?.range || row.journeySK >= bounds.range[0] && row.journeySK <= bounds.range[1])
           ? [{PK: row.PK, SK: row.SK, journeySK: row.journeySK}] : [])
-        .sort((x,y) => y.journeySK.localeCompare(x.journeySK)).slice(0, limit) }) }, 7);
+        .sort((x,y) => y.journeySK.localeCompare(x.journeySK)).slice(0, limit) }) }, 7, f.clock);
   return {...f, repair, thanks, visit, unread, activity};
 }
 
@@ -238,6 +238,26 @@ describe('Friend help cycle', () => {
       .toMatchObject({type:'FRIEND_HELP_REPAIR',sender:{id:a,avatarId:helperAvatar}});
     expect((await f.activity(a).activity(principal(a),{limit:20})).events[0])
       .toMatchObject({type:'FRIEND_HELP_THANKS',sender:{id:b,avatarId:ownerAvatar}});
+  });
+
+  it('expires Activity and thanks without undoing the repair, reward or repair notice', async () => {
+    const f = await helpFixture();
+    const requestId = randomUUID();
+    const result = await f.repair(requestId);
+    const { eventId, occurredAt } = result.event;
+    const progress = await f.store.get(playerKey(b, 'PROGRESS'));
+    const wallet = await f.store.get(playerKey(a, 'WALLET'));
+    expect(await f.store.get(playerKey(b, `FRIEND_HELP#${eventId}`))).toMatchObject({
+      activityExpiresAt: Date.parse(occurredAt) / 1000 + 30 * 86400,
+    });
+    f.tick(24 * 3600 * 1000);
+    expect((await f.activity(b).activity(principal(b), {})).events).toEqual([]);
+    await expect(f.thanks(b, eventId)).rejects.toMatchObject({code: 'HELP_EVENT_EXPIRED'});
+    expect((await f.unread()).entries).toHaveLength(1);
+    await f.store.commit([{ remove: playerKey(b, `FRIEND_HELP#${eventId}`) }]);
+    expect(await f.repair(requestId)).toEqual(result);
+    expect(await f.store.get(playerKey(b, 'PROGRESS'))).toEqual(progress);
+    expect(await f.store.get(playerKey(a, 'WALLET'))).toEqual(wallet);
   });
 
   it('atomically sends exactly one thanks per original event and preserves RAID feed entries', async () => {

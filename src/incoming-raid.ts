@@ -1,3 +1,4 @@
+import { loadActivityPolicy } from './activity-policy.js';
 import { ACTIVITY_KEY, ACTIVITY_PARTITION, INACTIVE_AFTER_MS, OFFLINE_AFTER_MS, isRaidCandidate } from './player-activity.js';
 import { createHash } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
@@ -9,7 +10,7 @@ import { buildingIds } from './world-config.js';
 import { regenerateRaidBots } from './raid-bots.js';
 import { decodeProgress, decodeWallet, encodeProgress, encodeWallet, playerKey, playerNumberOptions } from './repository.js';
 
-import { journeyReadKeys } from './journey-read-keys.js';
+import { activityFeedItem, journeyReadKeys } from './journey-read-keys.js';
 import { startWalletRaid, walletRaidDebit, WALLET_RAID_PREFIX } from './incoming-wallet-raid.js';
 
 const MINUTE=60000, DAY=86400000, SHARDS=16;
@@ -244,7 +245,7 @@ export class IncomingRaidService {
   }
 }
 export class DynamoIncomingStore implements IncomingStore {
-  constructor(private client:DynamoDBDocumentClient,private table:string) {}
+  constructor(private client:DynamoDBDocumentClient,private table:string, private activityPolicy = loadActivityPolicy()) {}
   async get(player:string,sk:string) { const r=await this.client.send(new GetCommand({TableName:this.table,Key:playerKey(player,sk),ConsistentRead:true})); if(!r.Item)return; const {PK,SK,...item}=r.Item;return item; }
   async due(now:string,partition:string) {
     const out:{playerId:string}[]=[]; let cursor:Record<string,any>|undefined;
@@ -275,9 +276,13 @@ export class DynamoIncomingStore implements IncomingStore {
   async commit(player:string,writes:IncomingWrite[],guard?: RaidGuard) {
     await this.client.send(new TransactWriteCommand({TransactItems:[
       ...writes.map(w=>({Put:{TableName:this.table,Item:{...playerKey(player,w.sk),...(w.sk === 'PROGRESS' ? encodeProgress(decodeProgress(w.value)) :
-          w.sk === 'WALLET' ? encodeWallet(decodeWallet(w.value)) : w.value), ...journeyReadKeys(player,w.sk,w.value)},
+          w.sk === 'WALLET' ? encodeWallet(decodeWallet(w.value)) : w.value), ...journeyReadKeys(player,w.sk,w.value,false)},
         ConditionExpression:w.expectedVersion===undefined?'attribute_not_exists(PK)':'#v = :v',
         ...(w.expectedVersion===undefined?{}:{ExpressionAttributeNames:{'#v':'version'},ExpressionAttributeValues:{':v':w.expectedVersion}})}})),
+      ...writes.flatMap(w => {
+        const feed = activityFeedItem(player, w.sk, w.value, this.activityPolicy);
+        return feed ? [{Put: {TableName: this.table, Item: feed}}] : [];
+      }),
       ...(guard ? [{ConditionCheck: {TableName: this.table, Key: playerKey(player, ACTIVITY_KEY),
         ConditionExpression: 'lastActiveAt BETWEEN :oldest AND :latest',
         ExpressionAttributeValues: {':oldest': guard.oldest, ':latest': guard.latest}}}] : []),
