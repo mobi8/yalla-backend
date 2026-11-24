@@ -41,7 +41,7 @@ export function rollRepairDiscount(roll: (max: number) => number = randomInt): n
   throw new RangeError('Invalid Friend HELP discount roll');
 }
 
-export function cloverState(row: Item | undefined, now: number) {
+export function cloverState(row: Record<string, unknown> | undefined, now: number) {
   const previous = Number(row?.remaining ?? capacity);
   const anchor = typeof row?.anchor === 'number' ? row.anchor : now;
   const charges = Math.max(0, Math.floor((now - anchor) / interval));

@@ -104,7 +104,9 @@ describe('drop transaction lifecycle', () => {
     await f.service.submit(principal, sid, rid, { ...result, requestId: '22222222-2222-4222-8222-222222222222' });
     expect(f.items.get('WALLET').yallaPoint).toBe(30); expect(f.items.get('PROGRESS').distance).toBe('15');
     expect([...f.items.keys()].filter(k => k.startsWith('ECONOMY#CAUSE#settle:'))).toHaveLength(1);
-    expect((await f.service.round(principal, sid, rid)).round.status).toBe('SETTLED');
+    const settled = await f.service.round(principal, sid, rid);
+    expect(settled.round.status).toBe('SETTLED');
+    expect(settled.bingo.missions.filter(m => m.completed).map(m => m.missionId)).toEqual(['Play']);
   });
   it('prevents new pending rounds, input changes, cross-player calls and changed result replays', async () => {
     const f = fixture(), sid = (await f.service.open(principal)).session!.sessionId;
@@ -120,6 +122,13 @@ describe('drop transaction lifecycle', () => {
     const result = await f.service.submit(principal, sid, r.round!.roundId, { requestId: input().requestId,
       actual: { ball: 'Ball008', color: 'RED', symbol: 'Crown' }, physicsVersion: assigned.physicsVersion });
     expect(result.round.matchStatus).toBe('MISMATCH'); expect(result.save.wallet.yallaPoint).toBe(60);
+    expect(result.bingo.missions.filter(m => m.completed).map(m => m.missionId)).toEqual(['Play', 'RedMatch', 'Multiplier']);
+    const blueStart = await f.service.begin(principal, sid, { ...input('33333333-3333-4333-8333-333333333333'), prediction: 'BLUE' });
+    const blueResult = await f.service.submit(principal, sid, blueStart.round!.roundId, {
+      requestId: '33333333-3333-4333-8333-333333333333', actual, physicsVersion: assigned.physicsVersion,
+    });
+    expect(blueResult.bingo.missions.find(m => m.missionId === 'BlueMatch')).toMatchObject({ completed: true });
+    expect(blueResult.bingo.completedLines).toEqual([0]);
     expect(result.collection!.jackpotTickets).toBe(1); expect([...f.items.keys()].some(k => k.startsWith('BONUS#'))).toBe(true);
     process.env.ENVIRONMENT = 'prod';
     try { await expect(f.service.begin(principal, sid, input())).rejects.toMatchObject({ code: 'RESULT_POLICY_DISABLED' }); }

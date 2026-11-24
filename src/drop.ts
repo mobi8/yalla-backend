@@ -1,3 +1,5 @@
+import { BingoMission } from './bingo.js';
+import type { BingoEvent } from './bingo-config.js';
 import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand, QueryCommand, NumberValue } from '@aws-sdk/lib-dynamodb';
@@ -19,7 +21,7 @@ export interface Round extends AssignedSet { schemaVersion: 1; version: number; 
   multiplier: number; collectionConfig?: GameConfig<'collection'>; journeyConfig?: GameConfig<'journey'>; issuedAt: string; cancelAfter: string; policy: 'PERMISSIVE';
   actual?: Outcome; actualPhysicsVersion?: string; matchStatus?: string; reward?: ReturnType<typeof settle>['reward']; settledAt?: string }
 type Item = Record<string, any>;
-export interface Write { sk: string; value: Item; expectedVersion?: number }
+export interface Write { sk: string; value: Item; expectedVersion?: number; delete?: true }
 export interface DropStore { get(player: string, sk: string): Promise<Item | undefined>; commit(player: string, writes: Write[]): Promise<void> }
 export class DynamoDropStore implements DropStore {
   constructor(private client: DynamoDBDocumentClient, private table: string) {}
@@ -27,25 +29,27 @@ export class DynamoDropStore implements DropStore {
     const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: playerKey(player, sk), ConsistentRead: true }));
     if (!Item) return undefined; const { PK, SK, ...value } = Item; return withoutJourneyKeys(value);
   }
-  async list(player: string, prefix: string, newestLimit?: number): Promise<Item[]> {
+  async list(player: string, prefix: string, limit?: number, newestFirst = true): Promise<Item[]> {
     const items: Item[] = []; let cursor: Record<string, any> | undefined;
     do {
       const result = await this.client.send(new QueryCommand({ TableName: this.table,
         KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)', ExpressionAttributeValues: { ':pk': `PLAYER#${player}`, ':sk': prefix },
-        ConsistentRead: true, ExclusiveStartKey: cursor, ...(newestLimit ? { ScanIndexForward: false, Limit: newestLimit-items.length } : {}) }));
+        ConsistentRead: true, ExclusiveStartKey: cursor, ...(limit ? { ScanIndexForward: !newestFirst, Limit: limit-items.length } : {}) }));
       for (const { PK, SK, ...value } of result.Items ?? []) items.push({ ...withoutJourneyKeys(value), _key: SK });
       cursor = result.LastEvaluatedKey;
-    } while (cursor && (!newestLimit || items.length < newestLimit));
+    } while (cursor && (!limit || items.length < limit));
     return items;
   }
   async commit(player: string, writes: Write[]) {
     await this.client.send(new TransactWriteCommand({ TransactItems: writes.map(w => {
+      const Key = playerKey(player, w.sk);
+      const condition = w.expectedVersion === undefined ? { ConditionExpression: 'attribute_not_exists(PK)' } :
+        { ConditionExpression: '#v = :v', ExpressionAttributeNames: { '#v': 'version' }, ExpressionAttributeValues: { ':v': w.expectedVersion } };
+      if (w.delete) return { Delete: { TableName: this.table, Key, ...condition } };
       const value: Item = { ...w.value, ...journeyReadKeys(player, w.sk, w.value) };
       for (const k of w.sk === 'WALLET' ? ['energyRechargeAnchor', 'energyRechargeHighWater'] :
         w.sk === 'PROGRESS' ? ['distance', 'lastDistanceMilestone', 'constructionStars'] : []) value[k] = NumberValue.from(value[k]);
-      return { Put: { TableName: this.table, Item: { ...playerKey(player, w.sk), ...value },
-        ConditionExpression: w.expectedVersion === undefined ? 'attribute_not_exists(PK)' : '#v = :v',
-        ...(w.expectedVersion === undefined ? {} : { ExpressionAttributeNames: { '#v': 'version' }, ExpressionAttributeValues: { ':v': w.expectedVersion } }) } };
+      return { Put: { TableName: this.table, Item: { ...Key, ...value }, ...condition } };
     }) }));
   }
 }
@@ -56,6 +60,9 @@ export class DropService {
   constructor(private players: PlayerRepository, private db: DropStore, private pools: PoolSource,
     private clock = Date.now, private uuid = randomUUID, private configs: ConfigSource = new GameConfigs(),
     private rollEvent = () => randomInt(10000)) {}
+  async bingoRecord(player: string, now: string, events: Parameters<BingoMission['record']>[2]) {
+    return new BingoMission(this.db, this.configs).record(player, now, events);
+  }
   private async owner(principal: Principal) {
     const id = await this.players.find(principal); if (!id) throw new ApiError(404, 'PLAYER_NOT_FOUND'); return id;
   }
@@ -81,10 +88,13 @@ export class DropService {
       const save = await this.players.read(player); if (!save) throw new ApiError(404, 'PLAYER_NOT_FOUND');
       const collection = await this.db.get(player, 'COLLECTION');
       const round = s?.pendingRoundId ? await this.db.get(player, `ROUND#${s.pendingRoundId}`) : null;
+      const bingo = new BingoMission(this.db, this.configs);
+      const now = new Date(this.clock()).toISOString();
+      const bingoState = await bingo.state(player, now);
       const after = await this.session(player);
       // Every issue/settle/cancel changes this version. Never pair a stale issued Round with a settled Wallet.
       if (s?.version !== after?.version || s?.sessionId !== after?.sessionId) continue;
-      return { session: s ?? null, round: round ?? null, save, collection: collection ?? null, serverTime: new Date(this.clock()).toISOString() };
+      return { session: s ?? null, round: round ?? null, save, collection: collection ?? null, serverTime: now, bingo: bingo.view(bingoState, now) };
     }
     throw new ApiError(409, 'STATE_CHANGED_RETRY_SAME_REQUEST');
   }
@@ -205,6 +215,13 @@ export class DropService {
           completed: 0, totalReward: 0, announced: false, cause: 'round-collection', status: 'PENDING' } });
       const receipt = writes.find(w => w.sk === `ECONOMY#OP#settle:${roundId}`)!;
       receipt.value.configVersion = `${collectionConfig.version}:${journeyConfig.version}`;
+      const match = r.prediction === input.actual.color;
+      const events: { type: BingoEvent; multiplier?: number }[] = [
+        { type: 'Play' }, { type: 'Multiplier', multiplier: result.reward.multiplier },
+      ];
+      if (match && input.actual.color === 'RED') events.push({ type: 'RedMatch' });
+      if (match && input.actual.color === 'BLUE') events.push({ type: 'BlueMatch' });
+      writes.push(...await this.bingoRecord(player, now, events));
       await this.db.commit(player, writes);
       console.info(JSON.stringify({ event: 'DROP_SETTLED', playerId: player, sessionId, roundId, poolFileId: r.poolFileId,
         setId: r.setId, seed: r.seed, expected: r.expected, actual: input.actual, matchStatus, physicsVersion: input.physicsVersion }));

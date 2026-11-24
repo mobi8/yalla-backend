@@ -1,3 +1,4 @@
+import { BingoService } from './bingo.js';
 import { DynamoFriendsRankingStore, FriendsRankingService } from './friends-ranking.js';
 import { FriendHelpService } from './friend-help.js';
 import { BotsConfigs } from './bots-config.js';
@@ -11,7 +12,7 @@ import { z } from 'zod';
 import { createWorldService,worldCommand,upgradeCommand,repairCommand,type WorldService } from './world.js';
 import { GameConfigs } from './game-config.js';
 import { createBonusService, bonusInput, kindInput, raidBeginInput, attackInput, pickInput, costumePurchaseInput, costumeEquipInput, type BonusService } from './bonus.js';
-import { createDropService, beginSchema, resultSchema, cancelSchema, type DropService } from './drop.js';
+import { DynamoDropStore, createDropService, beginSchema, resultSchema, cancelSchema, type DropService } from './drop.js';
 import type { Principal } from './model.js';
 import { ApiError, createDynamoRepository, playerNumberOptions } from './repository.js';
 import { activityQuery, createJourneyReadService, rankingQuery, type JourneyReadService } from './journey-read.js';
@@ -46,7 +47,7 @@ function body(event: HttpEvent): unknown {
   try { return JSON.parse(event.body ? (event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body) : '{}'); }
   catch { throw new ApiError(400, 'INVALID_JSON'); }
 }
-export function createHandler(service: PlayerService, authenticate: Authenticate = cognitoContext, identity?: GuestIdentity, drops?: DropService, bonuses?: BonusService, worlds?: WorldService, recordActivity?: (principal: Principal) => Promise<void>, journey?: JourneyReadService, devices?: NotificationDevices, friends?: FriendsService) {
+export function createHandler(service: PlayerService, authenticate: Authenticate = cognitoContext, identity?: GuestIdentity, drops?: DropService, bonuses?: BonusService, worlds?: WorldService, recordActivity?: (principal: Principal) => Promise<void>, journey?: JourneyReadService, devices?: NotificationDevices, friends?: FriendsService, bingo?: BingoService) {
   return async (event: HttpEvent) => {
     const response = (statusCode: number, data: unknown) => ({ statusCode,
       headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }, body: JSON.stringify(data) });
@@ -104,6 +105,24 @@ export function createHandler(service: PlayerService, authenticate: Authenticate
         const input = activityQuery.safeParse(query);
         if (!input.success) throw new ApiError(400, 'INVALID_REQUEST');
         return response(200, await journey.activity(principal, input.data));
+      }
+      if (event.rawPath.startsWith('/bingo/')) {
+        if (!bingo) throw new ApiError(503, 'BINGO_NOT_CONFIGURED');
+        const principal = await activePrincipal();
+        if (route === 'GET /bingo/state') return response(200, await bingo.get(principal));
+        if (route === 'POST /bingo/claim' || route === 'POST /bingo/ack') {
+          const input = z.strictObject({ bingoPeriodId: z.iso.date(), rewardId: z.string().regex(/^[a-z][a-z0-9-]{0,39}$/) }).safeParse(body(event));
+          if (!input.success) throw new ApiError(400, 'INVALID_REQUEST');
+          const { bingoPeriodId, rewardId } = input.data;
+          return response(200, route.endsWith('/claim') ? await bingo.claim(principal, bingoPeriodId, rewardId) :
+            await bingo.acknowledgeReward(principal, bingoPeriodId, rewardId));
+        }
+        if (route === 'POST /bingo/chest') {
+          const input = z.strictObject({ roundId: z.uuid() }).safeParse(body(event));
+          if (!input.success) throw new ApiError(400, 'INVALID_REQUEST');
+          return response(200, await bingo.acknowledgeChest(principal, input.data.roundId));
+        }
+        throw new ApiError(404, 'ROUTE_NOT_FOUND');
       }
       if(event.rawPath.startsWith('/worlds/')) {
         if(!worlds)throw new ApiError(503,'WORLD_NOT_CONFIGURED');
@@ -232,7 +251,7 @@ export async function handler(event: HttpEvent | z.infer<typeof opsNicknameReque
       if (!playerId) throw new ApiError(404, 'PLAYER_NOT_FOUND');
       await activity.record(playerId);
     }, journey, process.env.ENVIRONMENT === 'dev'
-      ? new NotificationDevices(client,table,players) : undefined, friends);
+      ? new NotificationDevices(client,table,players) : undefined, friends, new BingoService(players, new DynamoDropStore(client, table), configs));
   }
   return configured(event);
 }

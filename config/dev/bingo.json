@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "environment": "dev",
+  "version": "bingo-v1",
+  "data": {
+    "missions": [
+      {
+        "missionId": "Play",
+        "eventType": "Play",
+        "displayName": "First Play",
+        "icon": "bingo_ui_icon_play",
+        "requiredCount": 1,
+        "gridPosition": 0
+      },
+      {
+        "missionId": "RedMatch",
+        "eventType": "RedMatch",
+        "displayName": "Match Red",
+        "icon": "bingo_ui_icon_red_ball",
+        "requiredCount": 1,
+        "gridPosition": 1
+      },
+      {
+        "missionId": "BlueMatch",
+        "eventType": "BlueMatch",
+        "displayName": "Match Blue",
+        "icon": "bingo_ui_icon_blue_ball",
+        "requiredCount": 1,
+        "gridPosition": 2
+      },
+      {
+        "missionId": "Multiplier",
+        "eventType": "Multiplier",
+        "displayName": "Multiplier",
+        "icon": "bingo_ui_icon_multiplier",
+        "requiredCount": 1,
+        "gridPosition": 3,
+        "minimumMultiplier": 2
+      },
+      {
+        "missionId": "Attack",
+        "eventType": "Attack",
+        "displayName": "Attack",
+        "icon": "bingo_ui_icon_attack",
+        "requiredCount": 1,
+        "gridPosition": 4
+      },
+      {
+        "missionId": "Upgrade",
+        "eventType": "Upgrade",
+        "displayName": "Upgrade",
+        "icon": "bingo_ui_icon_village",
+        "requiredCount": 1,
+        "gridPosition": 5
+      },
+      {
+        "missionId": "JourneyChest",
+        "eventType": "JourneyChest",
+        "displayName": "Journey Chest",
+        "icon": "bingo_ui_icon_journey_chest",
+        "requiredCount": 1,
+        "gridPosition": 6
+      },
+      {
+        "missionId": "Jackpot",
+        "eventType": "Jackpot",
+        "displayName": "Jackpot",
+        "icon": "bingo_ui_icon_jackpot",
+        "requiredCount": 1,
+        "gridPosition": 7
+      },
+      {
+        "missionId": "Raid",
+        "eventType": "Raid",
+        "displayName": "Raid",
+        "icon": "bingo_ui_icon_raid",
+        "requiredCount": 1,
+        "gridPosition": 8
+      }
+    ],
+    "rewards": [
+      {
+        "rewardId": "lines-1",
+        "requiredLines": 1,
+        "displayName": "Yalla Coin",
+        "icon": "bingo_ui_icon_yalla_coin",
+        "rewardType": "YallaPoint",
+        "rewardAmount": 300,
+        "presentationType": "Currency"
+      },
+      {
+        "rewardId": "lines-3",
+        "requiredLines": 3,
+        "displayName": "Energy",
+        "icon": "bingo_ui_icon_energy",
+        "rewardType": "Energy",
+        "rewardAmount": 30,
+        "presentationType": "Currency"
+      },
+      {
+        "rewardId": "lines-5",
+        "requiredLines": 5,
+        "displayName": "Journey Chest",
+        "icon": "bingo_ui_icon_journey_chest",
+        "rewardType": "JourneyChest",
+        "rewardAmount": 1,
+        "presentationType": "JourneyChest"
+      },
+      {
+        "rewardId": "lines-8",
+        "requiredLines": 8,
+        "displayName": "Bingo Box",
+        "icon": "bingo_ui_icon_bingo_box",
+        "rewardType": "BingoBox",
+        "rewardAmount": 1,
+        "presentationType": "BingoBox",
+        "rewardItems": [
+          {
+            "rewardType": "Gold",
+            "rewardAmount": 100
+          },
+          {
+            "rewardType": "Energy",
+            "rewardAmount": 10
+          },
+          {
+            "rewardType": "Clover",
+            "rewardAmount": 1
+          },
+          {
+            "rewardType": "CostumePoint",
+            "rewardAmount": 1
+          }
+        ]
+      }
+    ]
+  }
+}

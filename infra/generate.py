@@ -182,6 +182,8 @@ routes += [("BonusGet", "GET /bonuses", "Player"), ("BonusEnsure", "POST /bonuse
            ("RaidPick", "POST /bonuses/raids/{operationId}/pick", "Player"), ("CostumePurchase", "POST /bonuses/costumes/purchase", "Player"),
            ("CostumeEquip", "POST /bonuses/costumes/equip", "Player"),
            ("RaidAck", "POST /bonuses/raids/{operationId}/ack", "Player"), ("RaidCancel", "POST /bonuses/raids/{operationId}/cancel", "Player")]
+routes += [("BingoState", "GET /bingo/state", "Player"), ("BingoClaim", "POST /bingo/claim", "Player"),
+           ("BingoAck", "POST /bingo/ack", "Player"), ("BingoChest", "POST /bingo/chest", "Player")]
 routes += [("WorldState", "GET /worlds/state", "Player"), ("WorldUpgrade", "POST /worlds/upgrade", "Player"),
            ("WorldRepair", "POST /worlds/repair", "Player"),
            ("WorldComplete", "POST /worlds/complete", "Player"), ("WorldSelect", "POST /worlds/select", "Player")]

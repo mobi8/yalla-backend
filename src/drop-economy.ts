@@ -30,6 +30,13 @@ export const multiplier = (prediction: string, actual: string) => prediction ===
 const SCALE = 10n ** 28n;
 export const scaled = (s: string) => { const [a, b = ''] = s.split('.'); return BigInt(a!) * SCALE + BigInt(b.padEnd(28, '0')); };
 export const decimal = (n: bigint) => `${n / SCALE}.${String(n % SCALE).padStart(28, '0')}`.replace(/\.?0+$/, '');
+export function rollJourneyReward(journey: ConfigData['journey'], roll = () => randomInt(10000)) {
+  if (!('rewards' in journey)) return { rewardType: journey.rewardType, rewardAmount: journey.rewardAmount };
+  let value = roll();
+  if (!Number.isInteger(value) || value < 0 || value >= 10000) throw new Error('Invalid Journey roll');
+  const { rewardType, rewardAmount } = journey.rewards.find(r => { value -= r.weight; return value < 0; })!;
+  return { rewardType, rewardAmount };
+}
 export function settle(wallet: Wallet, progress: Progress, collection: Collection, actual: Outcome,
   prediction: string, energy: number, now: string, rules: ConfigData['collection'], journey: ConfigData['journey'],
   checkpoint?: { processedDistance: string; claimedChestCount: string }, roll: () => number = () => randomInt(10000)) {
@@ -47,13 +54,7 @@ export function settle(wallet: Wallet, progress: Progress, collection: Collectio
   if (journey.repeat === 'ONCE') count = claimed > 0n ? 0n : count > 0n ? 1n : 0n;
   const rewards: { milestone: string; rewardType: 'Energy' | 'YallaPoint'; rewardAmount: number }[] = [];
   for (let i = 0n; i < count; i++) {
-    let selected: { rewardType: 'Energy' | 'YallaPoint'; rewardAmount: number };
-    if ('rewards' in journey) {
-      let value = roll();
-      if (!Number.isInteger(value) || value < 0 || value >= 10000) throw new Error('Invalid Journey roll');
-      selected = journey.rewards.find(r => { value -= r.weight; return value < 0; })!;
-    } else selected = journey;
-    rewards.push({ milestone: String(first + i), rewardType: selected.rewardType, rewardAmount: selected.rewardAmount });
+    rewards.push({ milestone: String(first + i), ...rollJourneyReward(journey, roll) });
   }
   const distanceEnergy = rewards.reduce((sum, r) => sum + (r.rewardType === 'Energy' ? r.rewardAmount : 0), 0);
   const distanceYallaPoint = rewards.reduce((sum, r) => sum + (r.rewardType === 'YallaPoint' ? r.rewardAmount : 0), 0);

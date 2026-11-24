@@ -138,6 +138,7 @@ describe('atomic bonus lifecycle',()=>{
       expect(JSON.stringify(response)).not.toContain('bagGold');
       const resumed=await reader.get(p);
       expect(resumed.bagRaid!.picks).toHaveLength(i+1);
+      expect(resumed.bingo.missions.find(m => m.missionId === 'Raid')?.completed).toBe(false);
       expect(JSON.stringify(resumed)).not.toContain('bagGold');
       expect(resumed.save.wallet.yallaPoint).toBe(0);
       expect(resumed.save.wallet.costumePoint).toBe(0);
@@ -150,6 +151,7 @@ describe('atomic bonus lifecycle',()=>{
     const last=commands[2]!;
     const [a,b]=await Promise.all([reader.pick(p,id,last),f.bonus.pick(p,id,last)]);
     expect(a.selection).toEqual(b.selection);
+    expect(a.bingo.missions.find(m => m.missionId === 'Raid')?.progress).toBe(1);
     const total=bagIds.reduce((sum,index)=>sum+gold[index]!,0);
     expect(total).toBeLessThanOrEqual(900);
     expect(a.result).toMatchObject({status:'SETTLED',result:{rewardAmount:total,costumePoint:wins}});
@@ -273,6 +275,7 @@ describe('atomic bonus lifecycle',()=>{
   it('consumes and pays jackpot once, even with concurrent new request IDs',async()=>{
     const f=await fixture();await f.bonus.ensure(p,'Jackpot');
     const [a,b]=await Promise.all([f.bonus.spin(p,{requestId:randomUUID()}),f.bonus.spin(p,{requestId:randomUUID()})]);
+    expect(a.bingo.missions.find(m => m.missionId === 'Jackpot')?.progress).toBe(1);
     expect(a.result!.id).toBe(b.result!.id);expect(f.items.get('WALLET').yallaPoint).toBe(5000);expect(f.items.get('COLLECTION').jackpotTickets).toBe(1);
     await f.bonus.spin(p,{requestId:a.result!.id});expect(f.items.get('WALLET').yallaPoint).toBe(5000);
     await Promise.all([f.bonus.acknowledge(p,'Jackpot',a.result!.id),f.bonus.acknowledge(p,'Jackpot',a.result!.id)]);
@@ -352,6 +355,7 @@ describe('atomic bonus lifecycle',()=>{
     f.items.get('COLLECTION').shieldCount=2;await f.bonus.ensure(p,'Raid');const ready=await f.bonus.beginRaid(p,{requestId:randomUUID()});
     const id=ready.result!.operation.raidId;
     await Promise.all([f.bonus.attack(p,id,{requestId:randomUUID(),facilityId:0}),f.bonus.attack(p,id,{requestId:randomUUID(),facilityId:0})]);
+    expect((await f.bonus.get(p)).bingo.missions.find(m => m.missionId === 'Attack')?.completed).toBe(true);
     expect(f.items.get('BONUS#STATE').raid.bots[0].shieldCount).toBe(2);
     expect(f.items.get('BONUS#STATE').raid.bots[0].shieldRegenAt).toBe(f.save.wallet.updatedAt);
     f.advance(3*3600000);const [a,b]=await Promise.all([f.bonus.get(p),f.bonus.get(p)]);

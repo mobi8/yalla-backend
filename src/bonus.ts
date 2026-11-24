@@ -179,6 +179,7 @@ export class BonusService {
       const collection=collectionSchema.parse({...ctx.collection,jackpotTickets:ctx.collection.jackpotTickets-cost,...meta(this.now(),ctx.collection.version+1)});
       await this.write(player,state,{...state,jackpot:receipt},ctx,[{sk:'WALLET',value:wallet,expectedVersion:ctx.save.wallet.version},
         {sk:'COLLECTION',value:collection,expectedVersion:ctx.collection.version},{sk:`JACKPOT#${input.requestId}`,value:{...receipt,...meta(this.now())}},
+        ...await this.drops.bingoRecord(player,this.now(),[{type:'Jackpot'}]),
         ...this.receipt(`jackpot:${input.requestId}`,'jackpot',`bonus:${receipt.batchKey}:${receipt.sequence}`,config,ctx,wallet,receipt,hash(input))]);
     });
     return {...await this.snapshot(principal),result:await this.db.get(player,`JACKPOT#${resultId}`)};
@@ -263,6 +264,7 @@ export class BonusService {
       await this.write(player,state,{...state,raid},ctx,[{sk:'WALLET',value:wallet,expectedVersion:ctx.save.wallet.version},
         {sk:'COLLECTION',value:collection,expectedVersion:ctx.collection.version},
         {sk:`RAID#${id}`,value:{...record,...meta(this.now(),record.version+1),status:'SETTLED',result},expectedVersion:record.version},
+        ...await this.drops.bingoRecord(player,this.now(),[{type:'Attack'}]),
         ...this.receipt(`raid:${id}`,'raid',`bonus:${record.batchKey}:${record.sequence}`,config,ctx,wallet,result,hash({id,facilityId:input.facilityId}))]);
     }); return {...await this.snapshot(principal),result:await this.db.get(player,`RAID#${id}`)};
   }
@@ -314,6 +316,7 @@ export class BonusService {
           yallaPoint:before.yallaPoint+rewardAmount,costumePoint:(before.costumePoint??0)+costumePoint});
         const collection=collectionSchema.parse({...ctx.collection,...meta(now,ctx.collection.version+1),raidTickets:ctx.collection.raidTickets-op.ticketCost});
         writes.push({sk:'WALLET',value:wallet,expectedVersion:before.version},{sk:'COLLECTION',value:collection,expectedVersion:ctx.collection.version},
+          ...await this.drops.bingoRecord(player,now,[{type:'Raid'}]),
           ...this.receipt(`raid:${id}`,'raid',`bonus:${record.batchKey}:${record.sequence}`,config,ctx,wallet,result,hash({id,picks:nextPicks})));
       }
       await this.write(player,state,{...state},ctx,writes);

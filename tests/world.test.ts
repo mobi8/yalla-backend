@@ -166,6 +166,7 @@ describe('World economy and one-way progress',()=>{
    const command={...await f.cmd(),buildingId:`building-${b}` as 'building-1',expectedLevel:level};
    const result=await f.service.execute(principal,'upgrade',command);await f.service.execute(principal,'upgrade',command);
    expect(result.result.cost).toBe(10);
+   expect(result.bingo.missions.find(m => m.missionId === 'Upgrade')?.progress).toBe(1);
   }
   expect(f.items.get('WALLET').yallaPoint).toBe(800);expect(f.items.get('PROGRESS').constructionStars).toBe('20');
   const command=await f.cmd();const [a,b]=await Promise.all([f.service.execute(principal,'complete',command),f.service.execute(principal,'complete',{...command,requestId:randomUUID()})]);

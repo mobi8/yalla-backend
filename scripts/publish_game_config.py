@@ -1,7 +1,7 @@
 """Validate and publish one dev Game Config. Initial creation cannot overwrite an existing key."""
 import argparse,json,subprocess
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('--name',required=True,choices=['collection','journey','jackpot','raid','world','world-buildings','world-rewards']);p.add_argument('--profile',required=True);p.add_argument('--region',default='ap-south-1');p.add_argument('--replace-etag',help='Explicit optimistic replacement; increment JSON version first')
+p=argparse.ArgumentParser();p.add_argument('--name',required=True,choices=['bingo','collection','journey','jackpot','raid','world','world-buildings','world-rewards']);p.add_argument('--profile',required=True);p.add_argument('--region',default='ap-south-1');p.add_argument('--replace-etag',help='Explicit optimistic replacement; increment JSON version first')
 a=p.parse_args();root=Path(__file__).resolve().parents[1];source=root/'config/dev'/(a.name+'.json')
 code="import {parseConfig} from './dist/game-config.js';import{readFileSync}from'node:fs';const c=parseConfig(process.argv[1],readFileSync(process.argv[2],'utf8'),'dev');console.log(JSON.stringify({version:c.version,hash:c.contentHash}));"
 info=json.loads(subprocess.check_output(['node','--input-type=module','-e',code,a.name,str(source)],cwd=root,text=True))

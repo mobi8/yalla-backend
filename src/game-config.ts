@@ -3,6 +3,7 @@ import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import { z } from 'zod';
 import { ApiError } from './repository.js';
 import { worldConfigSchema,worldBuildingsSchema,worldRewardsSchema } from './world-config.js';
+import { bingoConfigSchema } from './bingo-config.js';
 import { decimalString } from './model.js';
 const amount = z.number().int().min(0).max(2147483647), positive = amount.min(1);
 const botIds = ['player_1001','player_1002','player_1003','player_1005','player_1006','player_1007'] as const;
@@ -36,7 +37,7 @@ export const raidConfigSchema = z.strictObject({ ticketCost: z.literal(1), multi
   eligibleUpgradeCost: positive, levelSource: z.literal('CONFIG_INITIAL'), shieldRule: z.literal('CONSUME_ONE_BLOCK_ALL'),
   botTemplates: z.array(z.strictObject({ id: z.enum(botIds), avatarId: z.string().regex(/^[a-f0-9]{32}$/) })).length(6),
 }).refine(v => new Set(v.botTemplates.map(b => b.id)).size === 6 && v.initialShieldCounts.every(s => s <= v.shieldMaximum), 'Invalid bot profiles/shields');
-export const configSchemas = { world:worldConfigSchema, 'world-buildings':worldBuildingsSchema, 'world-rewards':worldRewardsSchema, collection: collectionConfigSchema, journey: journeyConfigSchema, jackpot: jackpotConfigSchema, raid: raidConfigSchema };
+export const configSchemas = { bingo: bingoConfigSchema, world:worldConfigSchema, 'world-buildings':worldBuildingsSchema, 'world-rewards':worldRewardsSchema, collection: collectionConfigSchema, journey: journeyConfigSchema, jackpot: jackpotConfigSchema, raid: raidConfigSchema };
 export type ConfigName = keyof typeof configSchemas;
 export type ConfigData = { [K in ConfigName]: z.infer<typeof configSchemas[K]> };
 export interface GameConfig<K extends ConfigName> { schemaVersion: 1; environment: string; version: string; contentHash: string; data: ConfigData[K] }
