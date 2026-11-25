@@ -22,12 +22,12 @@ export interface Round extends AssignedSet { schemaVersion: 1; version: number; 
   multiplier: number; collectionConfig?: GameConfig<'collection'>; journeyConfig?: GameConfig<'journey'>; issuedAt: string; cancelAfter: string; policy: 'PERMISSIVE';
   actual?: Outcome; actualPhysicsVersion?: string; matchStatus?: string; reward?: ReturnType<typeof settle>['reward']; settledAt?: string }
 type Item = Record<string, any>;
-export interface Write { sk: string; value: Item; expectedVersion?: number; delete?: true }
-export interface DropStore { get(player: string, sk: string): Promise<Item | undefined>; commit(player: string, writes: Write[]): Promise<void> }
+export interface Write { sk: string; value: Item; expectedVersion?: number; delete?: true; owner?: string; check?: { key: { PK: string; SK: string }; field: string; value: string | number } }
+export interface DropStore { get(player: string, sk: string, rawPartition?: boolean): Promise<Item | undefined>; commit(player: string, writes: Write[]): Promise<void> }
 export class DynamoDropStore implements DropStore {
   constructor(private client: DynamoDBDocumentClient, private table: string, private activityPolicy = loadActivityPolicy()) {}
-  async get(player: string, sk: string) {
-    const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: playerKey(player, sk), ConsistentRead: true }));
+  async get(player: string, sk: string, rawPartition = false) {
+    const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: rawPartition ? {PK:player,SK:sk} : playerKey(player, sk), ConsistentRead: true }));
     if (!Item) return undefined; const { PK, SK, ...value } = Item; return withoutJourneyKeys(value);
   }
   async list(player: string, prefix: string, limit?: number, newestFirst = true): Promise<Item[]> {
@@ -43,14 +43,19 @@ export class DynamoDropStore implements DropStore {
   }
   async commit(player: string, writes: Write[]) {
     await this.client.send(new TransactWriteCommand({ TransactItems: writes.flatMap((w): NonNullable<TransactWriteCommandInput['TransactItems']> => {
-      const Key = playerKey(player, w.sk);
+      if (w.check) return [{ ConditionCheck: {
+        TableName: this.table, Key: w.check.key, ConditionExpression: '#field = :value',
+        ExpressionAttributeNames: { '#field': w.check.field }, ExpressionAttributeValues: { ':value': w.check.value },
+      } }];
+      const owner = w.owner ?? player;
+      const Key = playerKey(owner, w.sk);
       const condition = w.expectedVersion === undefined ? { ConditionExpression: 'attribute_not_exists(PK)' } :
         { ConditionExpression: '#v = :v', ExpressionAttributeNames: { '#v': 'version' }, ExpressionAttributeValues: { ':v': w.expectedVersion } };
       if (w.delete) return [{ Delete: { TableName: this.table, Key, ...condition } }];
-      const value: Item = { ...w.value, ...journeyReadKeys(player, w.sk, w.value, false) };
+      const value: Item = { ...w.value, ...journeyReadKeys(owner, w.sk, w.value, false) };
       for (const k of w.sk === 'WALLET' ? ['energyRechargeAnchor', 'energyRechargeHighWater'] :
         w.sk === 'PROGRESS' ? ['distance', 'lastDistanceMilestone', 'constructionStars'] : []) value[k] = NumberValue.from(value[k]);
-      const feed = activityFeedItem(player, w.sk, w.value, this.activityPolicy);
+      const feed = activityFeedItem(owner, w.sk, w.value, this.activityPolicy);
       return [
         { Put: { TableName: this.table, Item: { ...Key, ...value }, ...condition } },
         ...(feed ? [{ Put: { TableName: this.table, Item: feed } }] : []),

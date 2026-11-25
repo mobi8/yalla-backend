@@ -180,7 +180,8 @@ export class FriendsService {
     const rows = await this.store.list(playerKey(player,'').PK,prefix,limit + 1,cursor && prefix + cursor);
     const requestId = (row: Item) => row.SK.slice(prefix.length);
     const entries = await Promise.all(rows.slice(0,limit).map(async row =>
-      ({ ...await this.profile(String(row.other)), requestId: requestId(row) })));
+      ({ ...await this.profile(String(row.other)), requestId: requestId(row),
+        ...(list === 'LIST' && !isBot(String(row.other)) ? { playerId: row.other } : {}) })));
     return { entries, nextCursor: rows.length > limit ? requestId(rows[limit - 1]!) : null };
   }
 

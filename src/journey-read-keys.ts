@@ -19,35 +19,60 @@ export function distanceOrder(distance: string, player: string) {
 }
 
 export function privateActivity(player: string, sk: string, value: Stored) {
-  const isIncomingAttack = sk.startsWith('INCOMING#RECEIPT#');
+  const raidPrefix = 'INCOMING#PLAYER_RAID#';
+  const incomingPlayerRaid = sk.startsWith(raidPrefix);
+  const outgoingPlayerRaid = sk.startsWith('RAID#') && value.status === 'SETTLED' &&
+    value.result?.eventType === 'RAID' && value.result?.defenderEntityType === 'RemotePlayer';
+  if (incomingPlayerRaid || outgoingPlayerRaid) {
+    const result = incomingPlayerRaid ? value : value.result;
+    const opponent = incomingPlayerRaid ? result.actorId : result.defenderId;
+    const belongs = incomingPlayerRaid
+      ? result.actorType === 'PLAYER' && result.targetPlayerId === player : result.attackerId === player;
+    const occurredAt = iso(result.occurredAt ?? result.timestamp);
+    if (!belongs || typeof opponent !== 'string' || !occurredAt || result.outcome !== 'HIT' ||
+        !amount(result.stolenYP) || result.stolenYP === 0 || value.test === true || result.test === true) return;
+    const human = {id:player,type:'PLAYER'}, other = {id:opponent,type:'PLAYER'};
+    return {
+      eventId:`RAID:${player}:${sk.slice(incomingPlayerRaid ? raidPrefix.length : 'RAID#'.length)}`,
+      occurredAt,type:'RAID',outcome:'STOLEN',direction:incomingPlayerRaid?'INCOMING':'OUTGOING',
+      attacker:incomingPlayerRaid?other:human,defender:incomingPlayerRaid?human:other,
+      stolenYP:result.stolenYP,
+      ...(incomingPlayerRaid && amount(result.balanceBefore) && result.balanceBefore > 0
+        ? {stolenPercent:Math.round(1000 * result.stolenYP / result.balanceBefore) / 10} : {}),
+    };
+  }
+  const isPlayerAttack = sk.startsWith('INCOMING#PLAYER_ATTACK#');
+  const isIncomingAttack = isPlayerAttack || sk.startsWith('INCOMING#RECEIPT#');
   const isIncomingRaid = sk.startsWith('INCOMING#WALLET_RAID#');
   const incoming = isIncomingAttack || isIncomingRaid;
   const result = incoming ? value : value.result;
   if (!result || (!incoming && (!sk.startsWith('RAID#') || value.status !== 'SETTLED' ||
       (value.operation?.eventType ?? result.eventType ?? 'ATTACK') !== 'ATTACK' ||
-      result.attackerEntityType !== 'LocalPlayer' || result.defenderEntityType !== 'SystemBot' ||
+      result.attackerEntityType !== 'LocalPlayer' || !['SystemBot', 'RemotePlayer'].includes(result.defenderEntityType) ||
       result.attackerId !== player))) return;
   if (incoming && result.targetPlayerId && result.targetPlayerId !== player) return;
+  if (isPlayerAttack && (result.actorType !== 'PLAYER' || result.targetPlayerId !== player)) return;
   const type = isIncomingRaid ? 'RAID' : 'ATTACK';
   if (isIncomingRaid && (result.actorType !== 'BOT' || result.targetType !== 'PLAYER' ||
       !amount(result.stolenYP) || result.stolenYP === 0 || result.outcome !== 'HIT')) return;
   const outcome = isIncomingRaid ? 'STOLEN' :
     result.outcome ?? (result.result === 'Success' ? 'HIT' : result.result === 'BlockedByShield' ? 'BLOCKED' : undefined);
   if (!isIncomingRaid && outcome !== 'HIT' && outcome !== 'BLOCKED') return;
-  const bot = incoming ? result.actorId ?? result.botId : result.defenderId;
-  const sequence = incoming ? sk.split('#').at(-1)?.replace(/^0+(?=\d)/, '') : sk.slice('RAID#'.length);
-  if (!sequence || (incoming && !/^\d+$/.test(sequence))) return;
+  const opponentId = incoming ? result.actorId ?? result.botId : result.defenderId;
+  const sequence = isPlayerAttack ? sk.slice('INCOMING#PLAYER_ATTACK#'.length) : incoming ? sk.split('#').at(-1)?.replace(/^0+(?=\d)/, '') : sk.slice('RAID#'.length);
+  if (!sequence || (incoming && !isPlayerAttack && !/^\d+$/.test(sequence))) return;
   const eventId = `${type}:${player}:${sequence}`;
   const occurredAt = iso(result.occurredAt ?? result.timestamp);
-  if (typeof bot !== 'string' || !bot || smoke.test(eventId) || value.test === true || result.test === true ||
+  if (typeof opponentId !== 'string' || !opponentId || smoke.test(eventId) || value.test === true || result.test === true ||
       (result.eventId !== undefined && result.eventId !== eventId) || !occurredAt) return;
   const facility = result.buildingId ?? result.facilityId ??
     (amount(result.selectedFacilityId) && result.selectedFacilityId < 5 ? `building-${result.selectedFacilityId + 1}` : undefined);
   const human = { id: player, type: 'PLAYER' };
-  const opponent = { id: botId(bot), type: 'BOT' };
+  const opponent = isPlayerAttack || result.defenderEntityType === 'RemotePlayer'
+    ? { id: opponentId, type: 'PLAYER' } : { id: botId(opponentId), type: 'BOT' };
   const before = result.balanceBefore;
   return {
-    eventId, occurredAt, type, outcome, attacker: incoming ? opponent : human, defender: incoming ? human : opponent,
+    eventId, occurredAt, type, outcome, ...(opponent.type === 'PLAYER' ? { direction: incoming ? 'INCOMING' : 'OUTGOING' } : {}), attacker: incoming ? opponent : human, defender: incoming ? human : opponent,
     ...(isIncomingRaid ? {
       stolenYP: result.stolenYP,
       ...(amount(before) && before > 0 ? { stolenPercent: Math.round(1000 * result.stolenYP / before) / 10 } : {}),

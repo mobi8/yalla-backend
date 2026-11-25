@@ -221,7 +221,7 @@ export class JourneyReadService {
     const remaining = candidates.filter(row => !cursor || row.journeySK < cursor);
     const selected = remaining.slice(0, limit);
     const batch = await Promise.all(selected.map(async row => {
-      if (!/^(ACTIVITY_FEED#|INCOMING#(?:RECEIPT|WALLET_RAID)#|RAID#|FRIEND_HELP(?:_THANKS)?#)/.test(row.SK)) return;
+      if (!/^(ACTIVITY_FEED#|INCOMING#(?:RECEIPT|WALLET_RAID|PLAYER_ATTACK|PLAYER_RAID)#|RAID#|FRIEND_HELP(?:_THANKS)?#)/.test(row.SK)) return;
       const item = await this.store.get(player, row.SK);
       if (!item) return;
       const expiry = typeof item.activityExpiresAt === 'number' ? item.activityExpiresAt : undefined;
@@ -242,10 +242,12 @@ export class JourneyReadService {
     const visible = batch.filter(record => record !== undefined);
     const senderSchema = z.object({ id: z.uuid(), type: z.literal('PLAYER') }).passthrough();
     const senders = visible.map(record => record.social ? senderSchema.safeParse(record.event.sender).data : undefined);
-    const profiles = await this.profiles([...(visible.some(record => !record.social) ? [player] : []),
-      ...senders.flatMap(sender => sender ? [sender.id] : [])]);
+    const participants = visible.flatMap(record => record.social ? [] :
+      [record.event.attacker, record.event.defender].filter(party => party.type === 'PLAYER').map(party => party.id));
+    const profiles = await this.profiles([...participants, ...senders.flatMap(sender => sender ? [sender.id] : [])]);
     const named = (party: { id: string; type: string }) => ({
       ...party, nickname: party.type === 'BOT' ? party.id : profiles.get(party.id)?.nickname ?? null,
+      ...(party.type === 'PLAYER' ? { avatarId: profiles.get(party.id)?.avatarId ?? null } : {}),
     });
     const events = visible.map<Record<string, unknown>>(({social,event,until}, index) => {
       const displayUntil = new Date(until).toISOString();

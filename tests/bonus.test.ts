@@ -5,8 +5,9 @@ import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { GameConfigs,parseConfig,type ConfigSource,type ConfigName } from '../src/game-config.js';
 import { BonusService,jackpotSegment,mirrorBots,type BonusStore } from '../src/bonus.js';
+import { privateActivity } from '../src/journey-read-keys.js';
 import { DropService,type Write } from '../src/drop.js';
-import { newSave,type Principal,type Save } from '../src/model.js';
+import { currentVillageDamage, newSave,type Principal,type Save } from '../src/model.js';
 import { newCollection,settle } from '../src/drop-economy.js';
 import type { PlayerRepository } from '../src/repository.js';
 import type { S3Client } from '@aws-sdk/client-s3';
@@ -16,12 +17,34 @@ const p:Principal={provider:'guest',subject:'owner'};
 async function fixture(kind:'Jackpot'|'Raid'='Jackpot',count=2) {
   const save=newSave('2026-11-17T00:00:00.000Z'),items=new Map<string,any>([['PROFILE',save.profile],['PROGRESS',save.progress],['WALLET',save.wallet]]);
   const player=save.profile.playerId;
-  const db:BonusStore={get:async(id,sk)=>id===player?structuredClone(items.get(sk)):undefined,
-    list:async(id,prefix)=>id===player?[...items].filter(([k])=>k.startsWith(prefix)).map(([k,v])=>({...structuredClone(v),_key:k})):[],
-    commit:async(_p,writes:Write[])=>{for(const w of writes)if(w.expectedVersion===undefined?items.has(w.sk):items.get(w.sk)?.version!==w.expectedVersion){const e=new Error();e.name='TransactionCanceledException';throw e;}
-      for(const w of writes)items.set(w.sk,structuredClone(w.value));}};
-  const players:PlayerRepository={find:async principal=>principal.subject==='owner'?player:undefined,
-    read:async()=>structuredClone({profile:items.get('PROFILE'),progress:items.get('PROGRESS'),wallet:items.get('WALLET')}) as Save,create:async()=>{}};
+  const partitions = new Map<string, Map<string, any>>([[player, items]]);
+  const partition = (id: string) => {
+    if (!partitions.has(id)) partitions.set(id, new Map());
+    return partitions.get(id)!;
+  };
+  const db:BonusStore = {
+    get:async(id,sk)=>structuredClone(partitions.get(id)?.get(sk)),
+    list:async(id,prefix)=>[...(partitions.get(id) ?? [])].filter(([k])=>k.startsWith(prefix))
+      .map(([k,v])=>({...structuredClone(v),_key:k})),
+    commit:async(id,writes:Write[])=>{
+      for(const w of writes) {
+        const value = partition(w.owner ?? id).get(w.sk);
+        const valid = w.check
+          ? partitions.get(w.check.key.PK.replace(/^PLAYER#/, ''))?.get(w.check.key.SK)?.[w.check.field] === w.check.value
+          : w.expectedVersion === undefined ? !value : value?.version === w.expectedVersion;
+        if (!valid) { const e=new Error();e.name='TransactionCanceledException';throw e; }
+      }
+      for(const w of writes) {
+        if (w.check) continue;
+        const rows = partition(w.owner ?? id);
+        if (w.delete) rows.delete(w.sk); else rows.set(w.sk,structuredClone(w.value));
+      }
+    },
+  };
+  const players:PlayerRepository={find:async principal=>principal.subject==='owner'?player:
+    partitions.get(principal.subject)?.has('PROFILE') ? principal.subject : undefined,
+    read:async id=>structuredClone({profile:partition(id).get('PROFILE'),progress:partition(id).get('PROGRESS'),
+      wallet:partition(id).get('WALLET')}) as Save,create:async()=>{}};
   const configs:ConfigSource={load:async name=>load(name)};
   const drops=new DropService(players,db,{pick:async()=>{throw new Error('No pool needed');}},()=>Date.parse(save.wallet.updatedAt),undefined,configs);
   await drops.open(p);
@@ -30,7 +53,7 @@ async function fixture(kind:'Jackpot'|'Raid'='Jackpot',count=2) {
   let now=Date.parse(save.wallet.updatedAt);
   const botSettings=structuredClone(DEFAULT_BOTS);
   const bonus=new BonusService(players,db,drops,configs,()=>now,()=>9999,{load:async()=>structuredClone(botSettings)});
-  return {bonus,drops,items,db,configs,players,save,botSettings,advance:(ms:number)=>{now+=ms;}};
+  return {bonus,drops,items,db,configs,players,save,botSettings,partition,advance:(ms:number)=>{now+=ms;}};
 }
 describe('versioned S3 game config',()=>{
   it('validates all four exact current policies and environment isolation',()=>{
@@ -391,5 +414,143 @@ describe('atomic bonus lifecycle',()=>{
     await expect(f.drops.begin(p,sid,{requestId:randomUUID(),prediction:'RED',energyCost:1})).rejects.toMatchObject({code:'BONUS_ACTIVE'});
     await f.bonus.attack(p,second.result!.operation.raidId,{requestId:randomUUID(),facilityId:4});
     await expect(f.bonus.cancelRaid(p,second.result!.operation.raidId)).rejects.toMatchObject({code:'RAID_ALREADY_SETTLED'});
+  });
+});
+
+describe('player attack targets', () => {
+  it('changes targets for free and atomically settles shields, damage, Activity and revenge across both accounts', async () => {
+    const f = await fixture('Raid', 3);
+    const attacker = f.save.profile.playerId;
+    const remote = newSave(f.save.wallet.updatedAt);
+    const defender = remote.profile.playerId;
+    const defenderPrincipal: Principal = {provider: 'guest', subject: defender};
+    const rows = f.partition(defender);
+    rows.set('PROFILE', remote.profile);
+    rows.set('PROGRESS', {...remote.progress, facilityLevels: [3,3,3,3,3]});
+    rows.set('WALLET', remote.wallet);
+    rows.set('COLLECTION', {...newCollection(remote.wallet.updatedAt),shieldCount:1,raidTickets:1});
+    rows.set('BONUS#batch#Raid',{...f.items.get('BONUS#batch#Raid'),total:1});
+    const pair = f.partition(`FRIENDS#PAIR#${[attacker,defender].sort().join('#')}`);
+    f.items.set('PROGRESS', {...f.save.progress,facilityLevels:[3,3,3,3,3]});
+    rows.set(`WORLD#${remote.progress.worldId}`,{version:1,status:'ACTIVE',levels:[3,3,3,3,3]});
+    await f.drops.open(defenderPrincipal);
+    await f.bonus.ensure(p,'Raid');
+    const base = await f.bonus.beginRaid(p,{requestId:randomUUID()});
+    const replaceRaidId = base.result!.operation.raidId;
+    const first = {requestId:randomUUID(),replaceRaidId,targetPlayerId:defender};
+    await expect(f.bonus.beginRaid(p,first)).rejects.toMatchObject({code:'RAID_TARGET_NOT_ALLOWED'});
+    expect(f.items.get(`RAID#${replaceRaidId}`).status).toBe('READY');
+
+    pair.set('STATE',{state:'ACCEPTED',revision:randomUUID()});
+    const target = await f.bonus.beginRaid(p,first);
+    expect(target.result!.operation.playerTarget).toMatchObject({
+      playerId:defender,nickname:remote.profile.nickname,avatarId:remote.profile.avatarId,facilityLevels:[3,3,3,3,3],shieldCount:1,
+    });
+    expect(f.items.get(`RAID#${replaceRaidId}`).status).toBe('CANCELLED');
+    expect(f.items.get('COLLECTION').raidTickets).toBe(3);
+    const strike = {requestId:randomUUID(),facilityId:0};
+    const [blocked, retry] = await Promise.all([
+      f.bonus.attack(p, first.requestId, strike), f.bonus.attack(p, first.requestId, strike),
+    ]);
+    expect(blocked.result!.result).toMatchObject({outcome:'BLOCKED',shieldConsumed:true,defenderEntityType:'RemotePlayer'});
+    expect(retry.result!.result).toEqual(blocked.result!.result);
+    expect(rows.get('COLLECTION').shieldCount).toBe(0);
+    expect(rows.get('PROGRESS').facilityLevels).toEqual([3,3,3,3,3]);
+    expect(f.items.get('COLLECTION').raidTickets).toBe(2);
+    expect((await f.bonus.revengeTargets(defenderPrincipal)).entries.map(row => row?.playerId)).toEqual([attacker]);
+    const incomingKey = `INCOMING#PLAYER_ATTACK#${first.requestId}`;
+    expect(privateActivity(defender,incomingKey,rows.get(incomingKey))).toMatchObject({
+      direction:'INCOMING',outcome:'BLOCKED',attacker:{id:attacker,type:'PLAYER'},
+    });
+    expect(privateActivity(attacker,`RAID#${first.requestId}`,f.items.get(`RAID#${first.requestId}`)))
+      .toMatchObject({direction:'OUTGOING',defender:{id:defender,type:'PLAYER'}});
+
+    await f.bonus.acknowledge(p,'Raid',first.requestId);
+    const older = newSave(f.save.wallet.updatedAt).profile;
+    f.partition(older.playerId).set('PROFILE', older);
+    rows.set(`REVENGE#${older.playerId}`,{version:1,occurredAt:f.save.wallet.updatedAt});
+    f.advance(1000);
+    const repeat = {requestId:randomUUID(),targetPlayerId:defender};
+    await f.bonus.beginRaid(p,repeat);
+    await f.bonus.attack(p,repeat.requestId,{...strike,facilityId:2});
+    await f.bonus.acknowledge(p,'Raid',repeat.requestId);
+    expect((await f.bonus.revengeTargets(defenderPrincipal)).entries.map(row => row?.playerId))
+      .toEqual([attacker,older.playerId]);
+    await f.bonus.ensure(defenderPrincipal,'Raid');
+    pair.set('STATE',{state:'REMOVED',revision:randomUUID()});
+    const counter = {requestId:randomUUID(),targetPlayerId:attacker};
+    await f.bonus.beginRaid(defenderPrincipal,counter);
+    await f.bonus.attack(defenderPrincipal,counter.requestId,{...strike,facilityId:1});
+    expect((await f.bonus.revengeTargets(defenderPrincipal)).entries.map(row => row?.playerId)).toEqual([older.playerId]);
+    expect(f.items.get('PROGRESS').facilityLevels).toEqual([3,2,3,3,3]);
+    expect(currentVillageDamage(f.items.get('PROGRESS'))['building-2']).toMatch(/^\d+$/);
+
+    const reply = {requestId:randomUUID(),targetPlayerId:defender};
+    await f.bonus.beginRaid(p,reply);
+    await f.bonus.attack(p,reply.requestId,strike);
+    expect((await f.bonus.revengeTargets(defenderPrincipal)).entries.map(row => row?.playerId))
+      .toEqual([attacker,older.playerId]);
+    expect(rows.get('PROGRESS').facilityLevels).toEqual([2,3,2,3,3]);
+    expect(rows.get(`WORLD#${remote.progress.worldId}`).levels).toEqual([2,3,2,3,3]);
+    expect(rows.has(incomingKey)).toBe(true);
+  });
+});
+
+describe('player wallet RAID', () => {
+  it('uses configurable bags, transfers conserved YP once, and limits each target for a rolling hour', async () => {
+    const f = await fixture('Raid', 2);
+    const attacker = f.save.profile.playerId;
+    const target = newSave(f.save.wallet.updatedAt);
+    const targetId = target.profile.playerId;
+    const targetPrincipal: Principal = {provider:'guest',subject:targetId};
+    const rows = f.partition(targetId);
+    rows.set('PROFILE',target.profile);
+    rows.set('PROGRESS',target.progress);
+    rows.set('WALLET',{...target.wallet,yallaPoint:1000});
+    rows.set('ACTIVITY',{lastActiveAt:f.save.wallet.updatedAt});
+    f.partition(`FRIENDS#PAIR#${[attacker,targetId].sort().join('#')}`)
+      .set('STATE',{state:'ACCEPTED',revision:randomUUID()});
+    f.items.get('BONUS#batch#Raid').eventTypes=['RAID','RAID'];
+    await f.bonus.ensure(p,'Raid');
+    const bot = await f.bonus.beginRaid(p,{requestId:randomUUID()});
+    const input = {requestId:randomUUID(),targetPlayerId:targetId,replaceRaidId:bot.result!.operation.raidId};
+    await expect(f.bonus.beginRaid(p,input)).rejects.toMatchObject({code:'RAID_TARGET_ONLINE_OR_INACTIVE'});
+    f.advance(6*60_000);
+    const opened = await f.bonus.beginRaid(p,input);
+    expect(JSON.stringify(opened)).not.toContain('bagGold');
+    expect(f.items.get('COLLECTION').raidTickets).toBe(2);
+    const id = input.requestId;
+    const values = f.items.get(`RAID#${id}`).bagGold as number[];
+    expect([...values].sort((a,b)=>a-b)).toEqual([0,0,0,100,200]);
+    const ids = [values.indexOf(100),values.indexOf(200),values.indexOf(0)];
+    const pick = (bagId: number) => f.bonus.pick(p,id,{requestId:randomUUID(),bagId});
+    await pick(ids[0]!);
+    expect(rows.get('WALLET').yallaPoint).toBe(1000);
+    await expect(f.bonus.beginRaid(p,{requestId:randomUUID(),replaceRaidId:id,targetPlayerId:targetId}))
+      .rejects.toMatchObject({code:'RAID_ALREADY_STARTED'});
+    await pick(ids[1]!);
+    const before = f.items.get('WALLET').yallaPoint;
+    const command = {requestId:randomUUID(),bagId:ids[2]!};
+    const [settled,replay] = await Promise.all([f.bonus.pick(p,id,command),f.bonus.pick(p,id,command)]);
+    expect(settled.result!.result).toMatchObject({rewardAmount:300,outcome:'HIT'});
+    expect(replay.result!.result).toEqual(settled.result!.result);
+    expect(f.items.get('WALLET').yallaPoint-before).toBe(300);
+    expect(rows.get('WALLET').yallaPoint).toBe(700);
+    expect((await f.bonus.revengeTargets(targetPrincipal,'RAID')).entries.map(row=>row?.playerId)).toEqual([attacker]);
+    expect((await f.bonus.revengeTargets(targetPrincipal,'ATTACK')).entries).toEqual([]);
+    const receiptKey = `INCOMING#PLAYER_RAID#${id}`;
+    expect(privateActivity(targetId,receiptKey,rows.get(receiptKey))).toMatchObject({type:'RAID',direction:'INCOMING',stolenYP:300});
+    expect(privateActivity(attacker,`RAID#${id}`,f.items.get(`RAID#${id}`))).toMatchObject({type:'RAID',direction:'OUTGOING',stolenYP:300});
+    await f.bonus.acknowledge(p,'Raid',id);
+    const second = {requestId:randomUUID(),targetPlayerId:targetId};
+    f.advance(60*60_000-1);
+    await expect(f.bonus.beginRaid(p,second)).rejects.toMatchObject({code:'RAID_TARGET_COOLDOWN'});
+    f.advance(1);
+    await f.bonus.beginRaid(p,second);
+    rows.set('ACTIVITY',{lastActiveAt:new Date(Date.parse(f.save.wallet.updatedAt)+66*60_000).toISOString()});
+    for (const bagId of [0,1,2]) await f.bonus.pick(p,second.requestId,{requestId:randomUUID(),bagId});
+    expect(f.items.get(`RAID#${second.requestId}`).result).toMatchObject({rewardAmount:0,targetUnavailable:true});
+    expect(rows.get('WALLET').yallaPoint).toBe(700);
+    expect(rows.get('PLAYER_RAID#COOLDOWN').version).toBe(1);
   });
 });

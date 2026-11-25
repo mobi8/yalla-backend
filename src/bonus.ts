@@ -1,4 +1,6 @@
-import { WALLET_RAID_PREFIX } from './incoming-wallet-raid.js';
+import { ACTIVITY_KEY, INACTIVE_AFTER_MS, OFFLINE_AFTER_MS } from './player-activity.js';
+import { loadPlayerWalletRaidPolicy } from './player-wallet-raid.js';
+import { startWalletRaid, walletRaidDebit, WALLET_RAID_PREFIX } from './incoming-wallet-raid.js';
 import { newBonusState, syncRaidBots } from './raid-bots.js';
 export { mirrorBots } from './raid-bots.js';
 import { regenBot } from './balance.js';
@@ -7,15 +9,17 @@ import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { z } from 'zod';
-import { ApiError, createDynamoRepository, type PlayerRepository } from './repository.js';
+import { ApiError, decodeProgress, decodeWallet, playerKey, playerNumberOptions, createDynamoRepository, type PlayerRepository } from './repository.js';
 import { DropService, DynamoDropStore, type DropStore, type Write, type Session } from './drop.js';
 import { GameConfigs, type ConfigSource, type GameConfig } from './game-config.js';
-import { collectionSchema, type Collection } from './drop-economy.js';
+import { collectionSchema, newCollection, type Collection } from './drop-economy.js';
 import { buildingIds, loadWorldCatalog } from './world-config.js';
-import { walletSchema, type Principal, type Save } from './model.js';
+import { currentVillageDamage, walletSchema, type Principal, type Save } from './model.js';
 export const bonusInput = z.strictObject({ requestId: z.string().uuid() });
 export const kindInput = z.strictObject({ kind: z.enum(['Jackpot','Raid']) });
-export const raidBeginInput = z.strictObject({ requestId: z.string().uuid(), botId: z.string().min(1).max(160).optional() });
+export const raidBeginInput = z.strictObject({ requestId: z.string().uuid(), botId: z.string().min(1).max(160).optional(),
+  targetPlayerId: z.uuid().optional(), replaceRaidId: z.uuid().optional(),
+}).refine(value => !value.botId || !value.targetPlayerId);
 export const attackInput = z.strictObject({ requestId: z.string().uuid(), facilityId: z.number().int().min(0).max(4) });
 export const pickInput = bonusInput.extend({ bagId: z.number().int().min(0).max(11) });
 export const costumePurchaseInput = bonusInput.extend({
@@ -44,7 +48,7 @@ export function jackpotSegment(weights: number[], roll: number) {
 }
 export class BonusService {
   constructor(private players: PlayerRepository, private db: BonusStore, private drops: DropService,
-    private configs: ConfigSource = new GameConfigs(), private clock = Date.now, private roll = () => randomInt(10000), private botsConfig: BotsSource = new BotsConfigs()) {}
+    private configs: ConfigSource = new GameConfigs(), private clock = Date.now, private roll = () => randomInt(10000), private botsConfig: BotsSource = new BotsConfigs(), private walletRaid = loadPlayerWalletRaidPolicy()) {}
   private now() { return new Date(this.clock()).toISOString(); }
   private async owner(p: Principal) { const id = await this.players.find(p); if (!id) throw new ApiError(404,'PLAYER_NOT_FOUND'); return id; }
   private async retry<T>(action: () => Promise<T>): Promise<T> {
@@ -198,33 +202,123 @@ export class BonusService {
       await this.write(player,state,next,ctx,[{sk:key,value:{...record,acknowledged:true,...meta(this.now(),record.version+1)},expectedVersion:record.version}]);
     }); return this.snapshot(principal);
   }
+  private revengeKey(other: string, eventType: 'ATTACK' | 'RAID') {
+    return `${eventType === 'RAID' ? 'RAID_REVENGE' : 'REVENGE'}#${other}`;
+  }
+
+  async revengeTargets(principal: Principal, eventType: 'ATTACK' | 'RAID' = 'ATTACK') {
+    const player = await this.owner(principal);
+    const prefix = this.revengeKey('', eventType);
+    const rows = await this.db.list(player, prefix);
+    const entries = await Promise.all(rows.sort((a, b) =>
+      b.occurredAt.localeCompare(a.occurredAt) || a._key.localeCompare(b._key)).map(async row => {
+      const playerId = row._key.slice(prefix.length);
+      const profile = await this.db.get(playerId, 'PROFILE');
+      return profile && { playerId, nickname: profile.nickname, avatarId: profile.avatarId };
+    }));
+    return { entries: entries.filter(Boolean) };
+  }
+
+  private async playerTarget(player: string, target: string, kind: 'ATTACK' | 'RAID') {
+    if (player === target) throw new ApiError(400, 'INVALID_RAID_TARGET');
+    const pair = `FRIENDS#PAIR#${[player, target].sort().join('#')}`;
+    const [revenge, relationship, profile, storedProgress, collection] = await Promise.all([
+      this.db.get(player, this.revengeKey(target, kind)), this.db.get(pair, 'STATE', true),
+      this.db.get(target, 'PROFILE'), this.db.get(target, 'PROGRESS'), this.db.get(target, 'COLLECTION'),
+    ]);
+    if (!revenge && (relationship?.state !== 'ACCEPTED' || typeof relationship.revision !== 'string'))
+      throw new ApiError(403, 'RAID_TARGET_NOT_ALLOWED');
+    if (!profile || !storedProgress) throw new ApiError(404, 'RAID_TARGET_NOT_FOUND');
+    const progress = decodeProgress(storedProgress);
+    return { revenge, relationship, pair, profile, progress,
+      collection: collection ? collectionSchema.parse(collection) : newCollection(this.now()),
+      collectionVersion: collection?.version as number | undefined };
+  }
+
+  private async eligibleWalletTarget(target: string) {
+    const cooldownKey = 'PLAYER_RAID#COOLDOWN';
+    const [row, activity, cooldown, settings] = await Promise.all([
+      this.db.get(target,'WALLET'), this.db.get(target,ACTIVITY_KEY),
+      this.db.get(target,cooldownKey), this.botsConfig.load(),
+    ]);
+    const now = this.clock();
+    const lastActiveAt = activity?.lastActiveAt;
+    const age = now - (typeof lastActiveAt === 'string' ? Date.parse(lastActiveAt) : NaN);
+    const policy = settings.offlinePolicy;
+    const offlineMin = policy ? policy.offlineMinMinutes * 60_000 : OFFLINE_AFTER_MS;
+    const offlineMax = policy ? policy.offlineMaxHours * 3600_000 : INACTIVE_AFTER_MS;
+    if (!(age >= offlineMin && age <= offlineMax)) throw new ApiError(409, 'RAID_TARGET_ONLINE_OR_INACTIVE');
+    if (cooldown && now - Date.parse(cooldown.updatedAt) < this.walletRaid.cooldownMs)
+      throw new ApiError(409, 'RAID_TARGET_COOLDOWN');
+    const wallet = row && decodeWallet(row);
+    if (!wallet || wallet.yallaPoint < this.walletRaid.minimumTargetYP)
+      throw new ApiError(409, 'RAID_TARGET_BALANCE_TOO_LOW');
+    return { wallet, lastActiveAt: lastActiveAt as string, cooldown, cooldownKey };
+  }
+
+  private raidAccess(target: string, kind: 'ATTACK' | 'RAID',
+    access: Awaited<ReturnType<BonusService['playerTarget']>>): Write {
+    return access.revenge
+      ? {sk:this.revengeKey(target,kind),value:{},delete:true,expectedVersion:access.revenge.version}
+      : {sk:'STATE',value:{},check:{key:{PK:access.pair,SK:'STATE'},field:'revision',value:access.relationship!.revision}};
+  }
+
   async beginRaid(principal:Principal,input:z.infer<typeof raidBeginInput>) {
     const player=await this.owner(principal); let id=input.requestId;
     await this.retry(async()=>{
       const previous=await this.db.get(player,`RAID#${input.requestId}`);
-      if(previous) { if(input.botId && previous.operation.botId!==input.botId) throw new ApiError(409,'IDEMPOTENCY_CONFLICT'); return; }
+      if(previous) { if((input.botId && previous.operation.botId!==input.botId) || previous.operation.playerTarget?.playerId!==input.targetPlayerId || previous.replacedRaidId!==input.replaceRaidId) throw new ApiError(409,'IDEMPOTENCY_CONFLICT'); return; }
       const state=await this.state(player); this.needRun(state,'Raid');
-      if(state.raid.activeRaid) { if(input.botId && state.raid.activeRaid.botId!==input.botId) throw new ApiError(409,'RAID_ACTIVE'); id=state.raid.activeRaid.raidId; return; }
+      let replaced: Item | undefined;
+      if (input.replaceRaidId) {
+        if (state.raid.activeRaid?.raidId !== input.replaceRaidId) throw new ApiError(409, 'RAID_NOT_ACTIVE');
+        replaced = await this.db.get(player, `RAID#${input.replaceRaidId}`);
+        if (replaced?.status !== 'READY' || replaced.picks?.length)
+          throw new ApiError(409, 'RAID_ALREADY_STARTED');
+      }
+      if(state.raid.activeRaid && !replaced) { if(input.targetPlayerId || (input.botId && state.raid.activeRaid.botId!==input.botId)) throw new ApiError(409,'RAID_ACTIVE'); id=state.raid.activeRaid.raidId; return; }
       const ctx=await this.context(player),config=await this.configs.load('raid'), botSettings=await this.botsConfig.load();
       if(ctx.collection.raidTickets<config.data.ticketCost) throw new ApiError(409,'INSUFFICIENT_RAID_TICKETS');
       const now=this.clock();
-      const bots=syncRaidBots(ctx.save.progress,config,botSettings,state.raid.bots,now),eligible=bots.filter(b=>b.worldId===ctx.save.progress.worldId && b.village===ctx.save.progress.village && botSettings.bots.some(t=>t.id===b.profileTemplateId && t.defenseEnabled)),bot=input.botId?eligible.find(b=>b.botId===input.botId):eligible[0];
-      if(!bot) throw new ApiError(400,'INVALID_RAID_TARGET');
       const eventType=state.run.eventTypes?.[state.run.completed] ?? 'ATTACK';
+      const target = input.targetPlayerId && await this.playerTarget(player, input.targetPlayerId, eventType);
+      const walletTarget = input.targetPlayerId && eventType === 'RAID' && await this.eligibleWalletTarget(input.targetPlayerId);
+      const bots=syncRaidBots(ctx.save.progress,config,botSettings,state.raid.bots,now);
+      const eligible=bots.filter(b=>b.worldId===ctx.save.progress.worldId && b.village===ctx.save.progress.village &&
+        botSettings.bots.some(t=>t.id===b.profileTemplateId && t.defenseEnabled));
+      const bot=input.botId?eligible.find(b=>b.botId===input.botId):eligible[0];
+      if(!target && !bot) throw new ApiError(400,'INVALID_RAID_TARGET');
+      const opponent = target ? {
+        botId: input.targetPlayerId!, worldId: target.progress.worldId, village: target.progress.village,
+        stateVersion: target.progress.version, facilityLevels: target.progress.facilityLevels,
+      } : bot!;
+      const damage = target ? currentVillageDamage(target.progress) : {};
+      const costs = opponent.facilityLevels.map((level: number, index: number) => !target ||
+        (target.collection.shieldCount > 0 || !target.progress.worldRunComplete && level > 1 && !damage[buildingIds[index]!])
+        ? config.data.eligibleUpgradeCost : null);
+      const playerTarget = target ? {
+        playerId: input.targetPlayerId!, nickname: target.profile.nickname, avatarId: target.profile.avatarId,
+        worldRunId: target.progress.worldRunId, facilityLevels: target.progress.facilityLevels,
+        shieldCount: target.collection.shieldCount,
+      } : undefined;
       const bags=eventType==='RAID'?config.data.bags:undefined;
       if(eventType==='RAID' && !bags)throw new ApiError(503,'RAID_BAGS_NOT_CONFIGURED');
-      const operation={raidId:id,eventType,attackerId:player,botId:bot.botId,worldId:bot.worldId,village:bot.village,botStateVersion:bot.stateVersion,
+      const operation={raidId:id,eventType,attackerId:player,botId:opponent.botId,worldId:opponent.worldId,village:opponent.village,botStateVersion:opponent.stateVersion,
         configurationVersion:config.version,ticketCost:config.data.ticketCost,multiplier:config.data.multiplier,
-        eligibleCosts:bot.facilityLevels.map(()=>config.data.eligibleUpgradeCost),config,
-        ...(bags?{bagCount:bags.count,pickLimit:bags.picks}:{})};
-      const bagGold=bags && Array.from({length:bags.count},(_,i)=>i<bags.winners?randomInt(bags.minGold,bags.maxGold+1):0);
-      if(bagGold)for(let i=bagGold.length-1;i>0;i--){
+        eligibleCosts:costs,config,
+        ...(playerTarget ? {playerTarget} : {}),
+        ...(walletTarget ? {bagCount:5,pickLimit:3} : bags ? {bagCount:bags.count,pickLimit:bags.picks} : {})};
+      const bagGold=walletTarget ? startWalletRaid(walletTarget.wallet.yallaPoint,this.walletRaid.bagWeightsBps).bags : bags && Array.from({length:bags.count},(_,i)=>i<bags.winners?randomInt(bags.minGold,bags.maxGold+1):0);
+      if(bagGold && !walletTarget)for(let i=bagGold.length-1;i>0;i--){
         const j=randomInt(i+1);
         [bagGold[i],bagGold[j]]=[bagGold[j]!,bagGold[i]!];
       }
       await this.write(player,state,{...state,raid:{...state.raid,bots,activeRaid:operation}},ctx,[{sk:`RAID#${id}`,value:{...meta(this.now()),operation,
         ...(bagGold?{bagGold,picks:[]}:{}),
-        acknowledged:false,status:'READY',batchKey:state.run.batchKey,sequence:state.run.completed+1}}]);
+        ...(replaced ? {replacedRaidId:input.replaceRaidId} : {}),
+        acknowledged:false,status:'READY',batchKey:state.run.batchKey,sequence:state.run.completed+1}},
+        ...(replaced ? [{sk:`RAID#${input.replaceRaidId}`, value:{...replaced,status:'CANCELLED',
+          ...meta(this.now(),replaced.version+1)},expectedVersion:replaced.version}] : [])]);
     }); return {...await this.snapshot(principal),result:publicRaidReceipt(await this.db.get(player,`RAID#${id}`))};
   }
   async attack(principal:Principal,id:string,input:z.infer<typeof attackInput>) {
@@ -237,6 +331,10 @@ export class BonusService {
       const state=await this.state(player);this.needRun(state,'Raid');
       if(state.raid.activeRaid?.raidId!==id) throw new ApiError(409,'RAID_NOT_ACTIVE');
       const ctx=await this.context(player),op=record.operation, config=op.config as GameConfig<'raid'>;
+      if (op.playerTarget) {
+        await this.attackPlayer(player, id, input.facilityId, record, state, ctx);
+        return;
+      }
       if(op.worldId!==ctx.save.progress.worldId || op.village!==ctx.save.progress.village) throw new ApiError(409,'PROGRESS_CHANGED');
       if(ctx.collection.raidTickets<op.ticketCost) throw new ApiError(409,'INSUFFICIENT_RAID_TICKETS');
       const storedBot=state.raid.bots.find((b:Item)=>b.botId===op.botId);
@@ -268,6 +366,85 @@ export class BonusService {
         ...this.receipt(`raid:${id}`,'raid',`bonus:${record.batchKey}:${record.sequence}`,config,ctx,wallet,result,hash({id,facilityId:input.facilityId}))]);
     }); return {...await this.snapshot(principal),result:await this.db.get(player,`RAID#${id}`)};
   }
+  private async attackPlayer(player: string, id: string, facility: number, record: Item, state: Item,
+    ctx: Awaited<ReturnType<BonusService['context']>>) {
+    const op = record.operation;
+    const defender = String(op.playerTarget.playerId);
+    if (ctx.collection.raidTickets < op.ticketCost) throw new ApiError(409, 'INSUFFICIENT_RAID_TICKETS');
+    const target = await this.playerTarget(player, defender, 'ATTACK');
+    const { progress, collection } = target;
+    if (progress.worldId !== op.worldId || progress.village !== op.village ||
+        progress.worldRunId !== op.playerTarget.worldRunId)
+      throw new ApiError(409, 'RAID_TARGET_VILLAGE_CHANGED');
+    const blocked = collection.shieldCount > 0;
+    const buildingId = buildingIds[facility]!;
+    const levelBefore = progress.facilityLevels[facility]!;
+    const damage = currentVillageDamage(progress);
+    if (op.eligibleCosts[facility] == null || (!blocked && (progress.worldRunComplete || levelBefore <= 1 || damage[buildingId])))
+      throw new ApiError(409, 'RAID_TARGET_FACILITY_UNAVAILABLE');
+
+    const now = this.now();
+    const attackId = BigInt(`0x${id.replaceAll('-', '')}`).toString();
+    const levelAfter = levelBefore - Number(!blocked);
+    let reward = op.eligibleCosts[facility] * op.multiplier;
+    if (blocked) {
+      const catalog = await loadWorldCatalog(this.configs);
+      const building = catalog.worlds.find(world => world.id === progress.worldId)?.buildings[facility];
+      const price = building?.levels[Math.min(levelBefore, 4) - 1]?.upgradeCost;
+      if (price == null) throw new ApiError(503, 'ATTACK_BUILDING_PRICE_UNAVAILABLE');
+      reward = Math.floor(price / 10);
+    }
+    const result = {
+      raidId:id, attackerId:player, defenderId:defender, attackerEntityType:'LocalPlayer', defenderEntityType:'RemotePlayer',
+      selectedFacilityId:facility, worldId:op.worldId, village:op.village, result:blocked?'BlockedByShield':'Success',
+      rewardAmount:reward, outcome:blocked?'BLOCKED':'HIT', shieldConsumed:blocked, timestamp:now,
+      defenderShieldCount:collection.shieldCount - Number(blocked),
+      ...(blocked ? {blockedRewardEligible:true} : {buildingId, levelBefore, levelAfter}),
+    };
+    const incoming = await this.db.get(defender, this.revengeKey(player,'ATTACK'));
+    const defenderWrites: Write[] = [
+      { owner:defender, sk:'COLLECTION', value:{...collection,shieldCount:collection.shieldCount-Number(blocked),
+        ...meta(now,(target.collectionVersion ?? 0)+1)}, expectedVersion:target.collectionVersion },
+      { owner:defender, sk:`INCOMING#PLAYER_ATTACK#${id}`, value:{...meta(now),attackId,actorId:player,
+        actorType:'PLAYER',targetPlayerId:defender,eventType:'ATTACK',occurredAt:now,worldId:progress.worldId,
+        timestamp:now, result:result.result,outcome:result.outcome,shieldConsumed:blocked,
+        ...(blocked ? {} : {buildingId,levelBefore,levelAfter})} },
+      { owner:defender, sk:this.revengeKey(player,'ATTACK'), value:{...meta(now,(incoming?.version ?? 0)+1),
+        occurredAt:now}, expectedVersion:incoming?.version },
+    ];
+    if (blocked) {
+      defenderWrites.push({sk:'PROGRESS',value:{},check:{key:playerKey(defender,'PROGRESS'),field:'version',value:progress.version}});
+    } else {
+      const levels = [...progress.facilityLevels];
+      levels[facility] = levelAfter;
+      const prior = Object.keys(damage).length ? progress.villageDamage : undefined;
+      defenderWrites.push({owner:defender,sk:'PROGRESS',expectedVersion:progress.version,value:{
+        ...progress,...meta(now,progress.version+1),facilityLevels:levels,
+        villageDamage:{...prior,worldRunId:progress.worldRunId,village:progress.village,
+          buildings:{...damage,[buildingId]:attackId},levelsBefore:{...prior?.levelsBefore,[buildingId]:levelBefore}},
+      }});
+      const sk = `WORLD#${progress.worldId}`;
+      const world = await this.db.get(defender,sk);
+      if (world?.status === 'COMPLETE') throw new ApiError(409, 'RAID_TARGET_VILLAGE_CHANGED');
+      if (world) defenderWrites.push({owner:defender,sk,expectedVersion:world.version,
+        value:{...world,...meta(now,world.version+1),levels}});
+    }
+    const access = this.raidAccess(defender,'ATTACK',target);
+    const wallet=walletSchema.parse({...ctx.save.wallet,yallaPoint:ctx.save.wallet.yallaPoint+reward,
+      ...meta(now,ctx.save.wallet.version+1)});
+    const attackerCollection=collectionSchema.parse({...ctx.collection,raidTickets:ctx.collection.raidTickets-op.ticketCost,
+      ...meta(now,ctx.collection.version+1)});
+    const raid={...state.raid,activities:[...state.raid.activities,result].slice(-40)};
+    await this.write(player,state,{...state,raid},ctx,[
+      {sk:'WALLET',value:wallet,expectedVersion:ctx.save.wallet.version},
+      {sk:'COLLECTION',value:attackerCollection,expectedVersion:ctx.collection.version},
+      {sk:`RAID#${id}`,value:{...record,...meta(now,record.version+1),status:'SETTLED',result},expectedVersion:record.version},
+      access,...defenderWrites,
+      ...await this.drops.bingoRecord(player,now,[{type:'Attack'}]),
+      ...this.receipt(`raid:${id}`,'raid',`bonus:${record.batchKey}:${record.sequence}`,op.config,ctx,wallet,result,hash({id,facilityId:facility})),
+    ]);
+  }
+
   async cancelRaid(principal:Principal,id:string) {
     const player=await this.owner(principal);
     await this.retry(async()=>{const record=await this.db.get(player,`RAID#${id}`);if(!record)throw new ApiError(404,'RAID_NOT_FOUND');
@@ -278,6 +455,36 @@ export class BonusService {
       await this.write(player,state,{...state,raid:{...state.raid,activeRaid:null}},ctx,[{sk:`RAID#${id}`,value:{...record,...meta(this.now(),record.version+1),status:'CANCELLED'},expectedVersion:record.version}]);
     });return this.snapshot(principal);
   }
+  private async settleWalletRaid(player: string, target: string, id: string, selected: number, now: string) {
+    const writes: Write[] = [];
+    let access, eligible;
+    try {
+      access = await this.playerTarget(player,target,'RAID');
+      eligible = await this.eligibleWalletTarget(target);
+    } catch (error) {
+      if (error instanceof ApiError && ['RAID_TARGET_NOT_ALLOWED','RAID_TARGET_NOT_FOUND',
+        'RAID_TARGET_ONLINE_OR_INACTIVE','RAID_TARGET_COOLDOWN','RAID_TARGET_BALANCE_TOO_LOW'].includes(error.code))
+        return {rewardAmount:0,writes,unavailable:true};
+      throw error;
+    }
+    const {wallet, lastActiveAt, cooldown, cooldownKey} = eligible;
+    const rewardAmount = walletRaidDebit(selected,wallet.yallaPoint,this.walletRaid.protectedBalanceBps);
+    if (!rewardAmount) return {rewardAmount,writes,unavailable:false};
+    const revengeKey=this.revengeKey(player,'RAID');
+    const revenge = await this.db.get(target,revengeKey);
+    writes.push(
+      {owner:target,sk:'WALLET',expectedVersion:wallet.version,value:{...wallet,...meta(now,wallet.version+1),
+        yallaPoint:wallet.yallaPoint-rewardAmount}},
+      {owner:target,sk:cooldownKey,expectedVersion:cooldown?.version,value:meta(now,(cooldown?.version ?? 0)+1)},
+      {owner:target,sk:revengeKey,expectedVersion:revenge?.version,value:{...meta(now,(revenge?.version ?? 0)+1),occurredAt:now}},
+      {owner:target,sk:`INCOMING#PLAYER_RAID#${id}`,value:{...meta(now),actorId:player,actorType:'PLAYER',
+        targetPlayerId:target,eventType:'RAID',occurredAt:now,outcome:'HIT',stolenYP:rewardAmount,balanceBefore:wallet.yallaPoint}},
+      {sk:ACTIVITY_KEY,value:{},check:{key:playerKey(target,ACTIVITY_KEY),field:'lastActiveAt',value:lastActiveAt}},
+      this.raidAccess(target,'RAID',access),
+    );
+    return {rewardAmount,writes,unavailable:false};
+  }
+
   async pick(principal:Principal,id:string,input:z.infer<typeof pickInput>) {
     const player=await this.owner(principal), key=`RAID#${id}`;
     const selection=await this.retry(async()=>{
@@ -293,23 +500,29 @@ export class BonusService {
       }
       if(record.status!=='READY')throw new ApiError(409,record.status==='CANCELLED'?'RAID_CANCELLED':'RAID_ALREADY_SETTLED');
       const config=op.config as GameConfig<'raid'>, rules=config.data.bags!;
-      if(input.bagId>=rules.count)throw new ApiError(400,'INVALID_RAID_BAG');
+      if(input.bagId>=(op.bagCount ?? rules.count))throw new ApiError(400,'INVALID_RAID_BAG');
       if(picks.some(p=>p.bagId===input.bagId))throw new ApiError(409,'RAID_BAG_ALREADY_PICKED');
       const state=await this.state(player);
       this.needRun(state,'Raid');
       if(state.raid.activeRaid?.raidId!==id)throw new ApiError(409,'RAID_NOT_ACTIVE');
       const ctx=await this.context(player),p=ctx.save.progress;
-      if(p.worldId!==op.worldId || p.village!==op.village)throw new ApiError(409,'PROGRESS_CHANGED');
+      if(!op.playerTarget && (p.worldId!==op.worldId || p.village!==op.village))throw new ApiError(409,'PROGRESS_CHANGED');
       if(ctx.collection.raidTickets<op.ticketCost)throw new ApiError(409,'INSUFFICIENT_RAID_TICKETS');
       const gold=record.bagGold[input.bagId] as number;
       const pick:BagPick={...input,gold,outcome:gold>0?'GOLD':'MISS'};
       const nextPicks=[...picks,pick],now=this.now();
       const next={...record,...meta(now,record.version+1),picks:nextPicks};
       const writes:Write[]=[{sk:key,value:next,expectedVersion:record.version}];
-      if(nextPicks.length===rules.picks){
-        const rewardAmount=Math.min(rules.goldCap,nextPicks.reduce((sum,p)=>sum+p.gold,0));
-        const costumePoint=nextPicks.filter(p=>p.outcome==='GOLD').length*rules.costumePointPerWin;
-        const result={raidId:id,eventType:'RAID',defenderId:op.botId,rewardAmount,costumePoint,timestamp:now};
+      if(nextPicks.length===(op.pickLimit ?? rules.picks)){
+        const selected = nextPicks.reduce((sum,p)=>sum+p.gold,0);
+        const transfer = op.playerTarget && await this.settleWalletRaid(player, op.playerTarget.playerId, id, Math.min(selected, 2147483647 - ctx.save.wallet.yallaPoint), now);
+        const rewardAmount = transfer ? transfer.rewardAmount : Math.min(rules.goldCap, selected);
+        const costumePoint = transfer && !rewardAmount ? 0 :
+          nextPicks.filter(p=>p.outcome==='GOLD').length*rules.costumePointPerWin;
+        const result={raidId:id,eventType:'RAID',defenderId:op.botId,rewardAmount,costumePoint,timestamp:now,
+          ...(transfer ? {attackerId:player,attackerEntityType:'LocalPlayer',defenderEntityType:'RemotePlayer',
+            stolenYP:rewardAmount,outcome:rewardAmount>0?'HIT':'MISS',targetUnavailable:transfer.unavailable} : {})};
+        if (transfer) writes.push(...transfer.writes);
         Object.assign(next,{status:'SETTLED',result});
         const before=ctx.save.wallet;
         const wallet=walletSchema.parse({...before,...meta(now,before.version+1),
@@ -375,6 +588,6 @@ export class BonusService {
   }
 }
 export function createBonusService(table:string,drops:DropService,configs:ConfigSource) {
-  const client=DynamoDBDocumentClient.from(new DynamoDBClient({}));
+  const client=DynamoDBDocumentClient.from(new DynamoDBClient({}), {unmarshallOptions:playerNumberOptions});
   return new BonusService(createDynamoRepository(table),new DynamoDropStore(client,table),drops,configs);
 }

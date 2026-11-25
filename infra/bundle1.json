@@ -57,6 +57,11 @@
         "enabled"
       ]
     },
+    "PlayerRaidBagWeightsBps": {
+      "Type": "String",
+      "Default": "0,2000,1000,0,0",
+      "AllowedPattern": "[0-9]{1,4}(,[0-9]{1,4}){4}"
+    },
     "NotificationArtifactKey": {
       "Type": "String",
       "Default": ""
@@ -1123,7 +1128,8 @@
                   "Condition": {
                     "ForAllValues:StringLike": {
                       "dynamodb:LeadingKeys": [
-                        "FRIENDS#PAIR#*"
+                        "FRIENDS#PAIR#*",
+                        "PLAYER#*"
                       ]
                     },
                     "StringEquals": {
@@ -1241,6 +1247,9 @@
             "PHYSICS_VERSION": "fixed-fresh-round-v1",
             "COGNITO_ISSUER": {
               "Fn::Sub": "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+            },
+            "PLAYER_RAID_BAG_WEIGHTS_BPS": {
+              "Ref": "PlayerRaidBagWeightsBps"
             }
           }
         }
@@ -1915,6 +1924,33 @@
           "Ref": "Api"
         },
         "RouteKey": "POST /bonuses/raids",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "PlayerIntegration"
+              }
+            ]
+          ]
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer"
+        },
+        "AuthorizationScopes": [
+          "aws.cognito.signin.user.admin"
+        ]
+      }
+    },
+    "RaidRevengeRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /bonuses/raids/revenge",
         "Target": {
           "Fn::Join": [
             "/",

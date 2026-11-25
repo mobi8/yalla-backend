@@ -187,7 +187,7 @@ routes += [("DistanceRanking", "GET /ranking/distance", "Player"), ("PlayerActiv
 routes += [("BonusGet", "GET /bonuses", "Player"), ("BonusEnsure", "POST /bonuses/ensure", "Player"),
            ("BonusAnnounce", "POST /bonuses/announce", "Player"), ("BonusFinish", "POST /bonuses/finish", "Player"),
            ("JackpotSpin", "POST /bonuses/jackpot/spins", "Player"), ("JackpotAck", "POST /bonuses/jackpot/{operationId}/ack", "Player"),
-           ("RaidBegin", "POST /bonuses/raids", "Player"), ("RaidAttack", "POST /bonuses/raids/{operationId}/attack", "Player"),
+           ("RaidBegin", "POST /bonuses/raids", "Player"), ("RaidRevenge", "GET /bonuses/raids/revenge", "Player"), ("RaidAttack", "POST /bonuses/raids/{operationId}/attack", "Player"),
            ("RaidPick", "POST /bonuses/raids/{operationId}/pick", "Player"), ("CostumePurchase", "POST /bonuses/costumes/purchase", "Player"),
            ("CostumeEquip", "POST /bonuses/costumes/equip", "Player"),
            ("RaidAck", "POST /bonuses/raids/{operationId}/ack", "Player"), ("RaidCancel", "POST /bonuses/raids/{operationId}/cancel", "Player")]
@@ -220,7 +220,7 @@ for name, route in (
     resources["Friends" + name + "Route"] = {"Type": "AWS::ApiGatewayV2::Route", "Condition": "IsDev", "Properties": properties}
 resources["PlayerRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"].append({
     "Effect": "Allow", "Action": "dynamodb:ConditionCheckItem", "Resource": arn("PlayerTable"),
-    "Condition": {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["FRIENDS#PAIR#*"]},
+    "Condition": {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["FRIENDS#PAIR#*", "PLAYER#*"]},
                   "StringEquals": {"dynamodb:EnclosingOperation": "TransactWriteItems"}},
 })
 resources["PlayerRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"].append({
@@ -228,6 +228,9 @@ resources["PlayerRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statemen
     "Condition": {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["PLAYER#*"]},
                   "StringEquals": {"dynamodb:EnclosingOperation": "TransactWriteItems"}},
 })
+parameters["PlayerRaidBagWeightsBps"] = {"Type": "String", "Default": "0,2000,1000,0,0",
+    "AllowedPattern": r"[0-9]{1,4}(,[0-9]{1,4}){4}"}
+resources["PlayerFunction"]["Properties"]["Environment"]["Variables"]["PLAYER_RAID_BAG_WEIGHTS_BPS"] = ref("PlayerRaidBagWeightsBps")
 parameters["NotificationArtifactKey"] = {"Type": "String", "Default": ""}
 notification_artifact = {"Fn::If": ["HasNotificationArtifact", ref("NotificationArtifactKey"), ref("ArtifactKey")]}
 resources["PlayerFunction"]["Properties"]["Code"]["S3Key"] = notification_artifact

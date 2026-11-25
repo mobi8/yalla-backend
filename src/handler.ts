@@ -141,6 +141,11 @@ export function createHandler(service: PlayerService, authenticate: Authenticate
         const principal = await activePrincipal();
         const parse = <T>(schema:z.ZodType<T>):T => { const input=schema.safeParse(body(event));
           if(!input.success)throw new ApiError(400,'INVALID_REQUEST');return input.data; };
+        if(route==='GET /bonuses/raids/revenge') {
+          const kind = z.enum(['ATTACK','RAID']).default('ATTACK').safeParse(event.queryStringParameters?.kind);
+          if (!kind.success) throw new ApiError(400,'INVALID_REQUEST');
+          return response(200,await bonuses.revengeTargets(principal,kind.data));
+        }
         if(route==='GET /bonuses')return response(200,await bonuses.get(principal));
         if(route==='POST /bonuses/ensure')return response(200,await bonuses.ensure(principal,parse(kindInput).kind));
         if(route==='POST /bonuses/finish')return response(200,await bonuses.finish(principal,parse(kindInput).kind));
