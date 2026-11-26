@@ -35,6 +35,7 @@ type Item = Record<string, any>;
 type BagPick = {requestId: string; bagId: number; outcome: 'GOLD'|'MISS'; gold: number};
 export interface BonusStore extends DropStore { list(player: string, prefix: string, newestLimit?: number): Promise<Item[]> }
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const ATTACK_COOLDOWN_MS = 60 * 60_000;
 const meta = (now: string, version = 1) => ({ schemaVersion: 1, version, updatedAt: now });
 function publicRaidReceipt(record: Item|undefined) {
   if (!record) return undefined;
@@ -216,7 +217,40 @@ export class BonusService {
       const profile = await this.db.get(playerId, 'PROFILE');
       return profile && { playerId, nickname: profile.nickname, avatarId: profile.avatarId };
     }));
-    return { entries: entries.filter(Boolean) };
+    const targets = entries.filter(entry => entry != null);
+    return { entries: eventType === 'ATTACK' ? await this.withAttackAvailability(principal, targets) : targets };
+  }
+
+  private attackableFacilities(progress: Save['progress'], shields: number) {
+    const damage = currentVillageDamage(progress);
+    return progress.facilityLevels.map((level, index) => shields > 0 ||
+      (!progress.worldRunComplete && level > 1 && !damage[buildingIds[index]!]));
+  }
+
+  private attackCooldownKey(target: string) { return `ATTACK_TARGET#${target}`; }
+
+  private attackCooldownUntil(cooldown: Item | undefined) {
+    const until = Date.parse(cooldown?.updatedAt ?? '') + ATTACK_COOLDOWN_MS;
+    return until > this.clock() ? new Date(until).toISOString() : null;
+  }
+
+  async withAttackAvailability<T extends {playerId?: string}>(principal: Principal, entries: T[]) {
+    const player = await this.owner(principal);
+    return Promise.all(entries.map(async entry => {
+      if (!entry.playerId) return entry;
+      const target = entry.playerId;
+      const [progress, collection, cooldown] = await Promise.all([
+        this.db.get(target, 'PROGRESS'),
+        this.db.get(target, 'COLLECTION'),
+        this.db.get(player, this.attackCooldownKey(target)),
+      ]);
+      const availableAt = this.attackCooldownUntil(cooldown);
+      const reason = !progress ? 'UNAVAILABLE'
+        : availableAt ? 'COOLDOWN'
+        : this.attackableFacilities(decodeProgress(progress), collection?.shieldCount ?? 0).some(Boolean)
+          ? null : 'NO_ATTACKABLE_BUILDINGS';
+      return {...entry, attackAvailability:{reason, availableAt, available: reason === null}};
+    }));
   }
 
   private async playerTarget(player: string, target: string, kind: 'ATTACK' | 'RAID') {
@@ -269,14 +303,23 @@ export class BonusService {
       const previous=await this.db.get(player,`RAID#${input.requestId}`);
       if(previous) { if((input.botId && previous.operation.botId!==input.botId) || previous.operation.playerTarget?.playerId!==input.targetPlayerId || previous.replacedRaidId!==input.replaceRaidId) throw new ApiError(409,'IDEMPOTENCY_CONFLICT'); return; }
       const state=await this.state(player); this.needRun(state,'Raid');
+      const active = state.raid.activeRaid;
+      // Recover legacy ATTACKs that were saved before empty targets were rejected.
+      const recoverEmptyTarget = !input.replaceRaidId && !input.targetPlayerId && !input.botId &&
+        active?.eventType === 'ATTACK' && active.playerTarget &&
+        Array.isArray(active.eligibleCosts) && active.eligibleCosts.length === buildingIds.length &&
+        active.eligibleCosts.every((cost: unknown) => cost === null);
+      const replacementId = input.replaceRaidId ?? (recoverEmptyTarget ? active.raidId : undefined);
       let replaced: Item | undefined;
-      if (input.replaceRaidId) {
-        if (state.raid.activeRaid?.raidId !== input.replaceRaidId) throw new ApiError(409, 'RAID_NOT_ACTIVE');
-        replaced = await this.db.get(player, `RAID#${input.replaceRaidId}`);
-        if (replaced?.status !== 'READY' || replaced.picks?.length)
+      if (replacementId) {
+        if (active?.raidId !== replacementId) throw new ApiError(409, 'RAID_NOT_ACTIVE');
+        replaced = await this.db.get(player, `RAID#${replacementId}`);
+        if (replaced?.status !== 'READY' || replaced.picks?.length) {
+          if (recoverEmptyTarget) { id = active.raidId; return; }
           throw new ApiError(409, 'RAID_ALREADY_STARTED');
+        }
       }
-      if(state.raid.activeRaid && !replaced) { if(input.targetPlayerId || (input.botId && state.raid.activeRaid.botId!==input.botId)) throw new ApiError(409,'RAID_ACTIVE'); id=state.raid.activeRaid.raidId; return; }
+      if(active && !replaced) { if(input.targetPlayerId || (input.botId && active.botId!==input.botId)) throw new ApiError(409,'RAID_ACTIVE'); id=active.raidId; return; }
       const ctx=await this.context(player),config=await this.configs.load('raid'), botSettings=await this.botsConfig.load();
       if(ctx.collection.raidTickets<config.data.ticketCost) throw new ApiError(409,'INSUFFICIENT_RAID_TICKETS');
       const now=this.clock();
@@ -292,10 +335,14 @@ export class BonusService {
         botId: input.targetPlayerId!, worldId: target.progress.worldId, village: target.progress.village,
         stateVersion: target.progress.version, facilityLevels: target.progress.facilityLevels,
       } : bot!;
-      const damage = target ? currentVillageDamage(target.progress) : {};
-      const costs = opponent.facilityLevels.map((level: number, index: number) => !target ||
-        (target.collection.shieldCount > 0 || !target.progress.worldRunComplete && level > 1 && !damage[buildingIds[index]!])
-        ? config.data.eligibleUpgradeCost : null);
+      if (target && eventType === 'ATTACK' &&
+          this.attackCooldownUntil(await this.db.get(player, this.attackCooldownKey(input.targetPlayerId!))))
+        throw new ApiError(409, 'ATTACK_TARGET_COOLDOWN');
+      const attackable = target && this.attackableFacilities(target.progress, target.collection.shieldCount);
+      const costs: (number | null)[] = opponent.facilityLevels.map((_level: number, index: number) =>
+        !attackable || attackable[index] ? config.data.eligibleUpgradeCost : null);
+      if (target && eventType === 'ATTACK' && costs.every(cost => cost === null))
+        throw new ApiError(409, 'ATTACK_TARGET_NO_ELIGIBLE_BUILDINGS');
       const playerTarget = target ? {
         playerId: input.targetPlayerId!, nickname: target.profile.nickname, avatarId: target.profile.avatarId,
         worldRunId: target.progress.worldRunId, facilityLevels: target.progress.facilityLevels,
@@ -315,9 +362,9 @@ export class BonusService {
       }
       await this.write(player,state,{...state,raid:{...state.raid,bots,activeRaid:operation}},ctx,[{sk:`RAID#${id}`,value:{...meta(this.now()),operation,
         ...(bagGold?{bagGold,picks:[]}:{}),
-        ...(replaced ? {replacedRaidId:input.replaceRaidId} : {}),
+        ...(input.replaceRaidId ? {replacedRaidId:input.replaceRaidId} : {}),
         acknowledged:false,status:'READY',batchKey:state.run.batchKey,sequence:state.run.completed+1}},
-        ...(replaced ? [{sk:`RAID#${input.replaceRaidId}`, value:{...replaced,status:'CANCELLED',
+        ...(replaced ? [{sk:`RAID#${replacementId}`, value:{...replaced,status:'CANCELLED',
           ...meta(this.now(),replaced.version+1)},expectedVersion:replaced.version}] : [])]);
     }); return {...await this.snapshot(principal),result:publicRaidReceipt(await this.db.get(player,`RAID#${id}`))};
   }
@@ -371,7 +418,11 @@ export class BonusService {
     const op = record.operation;
     const defender = String(op.playerTarget.playerId);
     if (ctx.collection.raidTickets < op.ticketCost) throw new ApiError(409, 'INSUFFICIENT_RAID_TICKETS');
-    const target = await this.playerTarget(player, defender, 'ATTACK');
+    const cooldownKey = this.attackCooldownKey(defender);
+    const [target, cooldown] = await Promise.all([
+      this.playerTarget(player, defender, 'ATTACK'), this.db.get(player, cooldownKey),
+    ]);
+    if (this.attackCooldownUntil(cooldown)) throw new ApiError(409, 'ATTACK_TARGET_COOLDOWN');
     const { progress, collection } = target;
     if (progress.worldId !== op.worldId || progress.village !== op.village ||
         progress.worldRunId !== op.playerTarget.worldRunId)
@@ -439,6 +490,7 @@ export class BonusService {
       {sk:'WALLET',value:wallet,expectedVersion:ctx.save.wallet.version},
       {sk:'COLLECTION',value:attackerCollection,expectedVersion:ctx.collection.version},
       {sk:`RAID#${id}`,value:{...record,...meta(now,record.version+1),status:'SETTLED',result},expectedVersion:record.version},
+      {sk:cooldownKey,value:meta(now,(cooldown?.version ?? 0)+1),expectedVersion:cooldown?.version},
       access,...defenderWrites,
       ...await this.drops.bingoRecord(player,now,[{type:'Attack'}]),
       ...this.receipt(`raid:${id}`,'raid',`bonus:${record.batchKey}:${record.sequence}`,op.config,ctx,wallet,result,hash({id,facilityId:facility})),

@@ -418,6 +418,27 @@ describe('atomic bonus lifecycle',()=>{
 });
 
 describe('player attack targets', () => {
+  it.each([false, true])('recovers a saved empty ATTACK without consuming a ticket (explicit retry: %s)', async explicitRetry => {
+    const f = await fixture('Raid', 2);
+    await f.bonus.ensure(p,'Raid');
+    const first = await f.bonus.beginRaid(p,{requestId:randomUUID()});
+    const original = first.result!.operation;
+    const state = f.items.get('BONUS#STATE');
+    const record = f.items.get(`RAID#${original.raidId}`);
+    const empty = {...original, playerTarget:{playerId:randomUUID()}, eligibleCosts:[null,null,null,null,null]};
+    f.items.set('BONUS#STATE', {...state,raid:{...state.raid,activeRaid:empty}});
+    f.items.set(`RAID#${original.raidId}`, {...record,operation:empty});
+
+    const request = {requestId:randomUUID(), ...(explicitRetry ? {replaceRaidId:original.raidId} : {})};
+    const recovered = await f.bonus.beginRaid(p,request);
+    expect(recovered.result!.operation.raidId).toBe(request.requestId);
+    expect(recovered.result!.operation.playerTarget).toBeUndefined();
+    expect(recovered.result!.operation.eligibleCosts.some((cost: unknown) => cost != null)).toBe(true);
+    expect((await f.bonus.beginRaid(p,request)).result!.operation.raidId).toBe(request.requestId);
+    expect(f.items.get(`RAID#${original.raidId}`).status).toBe('CANCELLED');
+    expect(f.items.get('COLLECTION').raidTickets).toBe(2);
+  });
+
   it('changes targets for free and atomically settles shields, damage, Activity and revenge across both accounts', async () => {
     const f = await fixture('Raid', 3);
     const attacker = f.save.profile.playerId;
@@ -442,6 +463,14 @@ describe('player attack targets', () => {
     expect(f.items.get(`RAID#${replaceRaidId}`).status).toBe('READY');
 
     pair.set('STATE',{state:'ACCEPTED',revision:randomUUID()});
+    rows.set('COLLECTION', {...rows.get('COLLECTION'), shieldCount:0});
+    rows.set('PROGRESS', {...rows.get('PROGRESS'), facilityLevels:[1,1,1,1,1]});
+    expect((await f.bonus.withAttackAvailability(p,[{playerId:defender}]))[0])
+      .toMatchObject({attackAvailability:{available:false,reason:'NO_ATTACKABLE_BUILDINGS'}});
+    await expect(f.bonus.beginRaid(p,first)).rejects.toMatchObject({code:'ATTACK_TARGET_NO_ELIGIBLE_BUILDINGS'});
+    expect(f.items.get(`RAID#${replaceRaidId}`).status).toBe('READY');
+    rows.set('COLLECTION', {...rows.get('COLLECTION'), shieldCount:1});
+    rows.set('PROGRESS', {...rows.get('PROGRESS'), facilityLevels:[3,3,3,3,3]});
     const target = await f.bonus.beginRaid(p,first);
     expect(target.result!.operation.playerTarget).toMatchObject({
       playerId:defender,nickname:remote.profile.nickname,avatarId:remote.profile.avatarId,facilityLevels:[3,3,3,3,3],shieldCount:1,
@@ -469,8 +498,12 @@ describe('player attack targets', () => {
     const older = newSave(f.save.wallet.updatedAt).profile;
     f.partition(older.playerId).set('PROFILE', older);
     rows.set(`REVENGE#${older.playerId}`,{version:1,occurredAt:f.save.wallet.updatedAt});
-    f.advance(1000);
+    f.advance(60*60_000-1);
     const repeat = {requestId:randomUUID(),targetPlayerId:defender};
+    await expect(f.bonus.beginRaid(p,repeat)).rejects.toMatchObject({code:'ATTACK_TARGET_COOLDOWN'});
+    expect((await f.bonus.withAttackAvailability(p,[{playerId:defender}]))[0])
+      .toMatchObject({attackAvailability:{available:false,reason:'COOLDOWN'}});
+    f.advance(1);
     await f.bonus.beginRaid(p,repeat);
     await f.bonus.attack(p,repeat.requestId,{...strike,facilityId:2});
     await f.bonus.acknowledge(p,'Raid',repeat.requestId);
@@ -485,6 +518,7 @@ describe('player attack targets', () => {
     expect(f.items.get('PROGRESS').facilityLevels).toEqual([3,2,3,3,3]);
     expect(currentVillageDamage(f.items.get('PROGRESS'))['building-2']).toMatch(/^\d+$/);
 
+    f.advance(60*60_000);
     const reply = {requestId:randomUUID(),targetPlayerId:defender};
     await f.bonus.beginRaid(p,reply);
     await f.bonus.attack(p,reply.requestId,strike);

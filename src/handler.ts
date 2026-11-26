@@ -77,8 +77,17 @@ export function createHandler(service: PlayerService, authenticate: Authenticate
         if (!friends) throw new ApiError(503, 'FRIENDS_NOT_CONFIGURED');
         if (route.startsWith('GET /invites/'))
           return response(200, await friends.invite(event.rawPath.slice('/invites/'.length)));
-        if (event.rawPath.startsWith('/friends/'))
-          return response(200, await friends.route(await authenticate(event), route, event.queryStringParameters ?? {}, () => body(event)));
+        if (event.rawPath.startsWith('/friends/')) {
+          const principal = await authenticate(event);
+          const { attack, ...query } = event.queryStringParameters ?? {};
+          const result = await friends.route(principal, route, query, () => body(event));
+          if (route === 'GET /friends/list' && attack === '1') {
+            if (!bonuses) throw new ApiError(503, 'BONUS_NOT_CONFIGURED');
+            const page = result as {entries: Array<{playerId?: string}>; nextCursor: string | null};
+            return response(200, {...page, entries: await bonuses.withAttackAvailability(principal, page.entries)});
+          }
+          return response(200, result);
+        }
         throw new ApiError(404, 'ROUTE_NOT_FOUND');
       }
       if (route === 'POST /players/me/devices' || route.startsWith('DELETE /players/me/devices/')) {
