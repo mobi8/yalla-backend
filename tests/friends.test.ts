@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { marshall } from '@aws-sdk/util-dynamodb';
 import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_BOTS } from '../src/bots-config.js';
-import { FriendHelpService, cloverState, rollRepairDiscount } from '../src/friend-help.js';
+import { FriendHelpService, cloverState, helperBotTarget, rollRepairDiscount } from '../src/friend-help.js';
 import { parseConfig, type ConfigName } from '../src/game-config.js';
 import { FriendsService } from '../src/friends.js';
 import { DynamoFriendsStore, type FriendsStore, type Item, type Key, type Write } from '../src/friends-store.js';
@@ -170,16 +170,34 @@ describe('Friend help cycle', () => {
     expect((await f.visit()).clover.remaining).toBe(5);
   });
 
-  it('includes authoritative clover on the first HELP page even when the list is empty', async () => {
+  it('includes authoritative clover on the first HELP page even when only the bot needs help', async () => {
     const f = await helpFixture(1);
     await f.repair();
     const empty = await f.api(a,'GET /friends/help');
-    expect(empty).toMatchObject({entries:[], clover:{remaining:4,capacity:5},
+    expect(empty).toMatchObject({entries:[helperBotTarget], clover:{remaining:4,capacity:5},
       serverTime:new Date(today).toISOString()});
     expect(empty.clover).toEqual((await f.visit()).clover);
     f.tick(4 * 60 * 60 * 1000);
     expect((await f.api(a,'GET /friends/help')).clover)
       .toMatchObject({remaining:5,nextAt:null});
+  });
+
+  it('offers a three-building bot to an account without accepted friends and settles each request once', async () => {
+    const f = await helpFixture();
+    const player = c;
+    f.store.rows.set(key(playerKey(player, 'WALLET')), { ...playerKey(player, 'WALLET'), ...newSave().wallet });
+    expect((await f.api(player, 'GET /friends/help')).entries).toEqual([helperBotTarget]);
+    const targetId = helperBotTarget.targetId;
+    const view = await f.api(player, 'GET /friends/help/visit', {targetId});
+    expect(view.friend).toMatchObject({id: targetId, type: 'BOT'});
+    expect(view.repairs).toHaveLength(3);
+    expect(view.repairs.every((repair: {eligible: boolean}) => repair.eligible)).toBe(true);
+    const body = {targetId, requestId: randomUUID()};
+    const first = await f.api(player, 'POST /friends/help/repair', {}, body);
+    expect(first).toMatchObject({clover:{remaining:4}, energyReward:30});
+    expect(await f.api(player, 'POST /friends/help/repair', {}, body)).toEqual(first);
+    expect((await f.store.get(playerKey(player, 'WALLET')))?.energy).toBe(newSave().wallet.energy + 30);
+    expect(await f.store.get(playerKey(targetId, 'PROGRESS'))).toBeUndefined();
   });
 
   it('returns the visited friend’s equipped costume without exposing inventory or using the visitor’s outfit', async () => {
@@ -216,7 +234,7 @@ describe('Friend help cycle', () => {
     expect((await f.api(a,'GET /friends/help')).entries[0].damagedBuildingCount).toBe(1);
     expect((await f.repair()).event.buildingId).toBe('building-1');
     await expect(f.repair()).rejects.toMatchObject({code:'NO_HELP_ELIGIBLE_DAMAGE'});
-    expect((await f.api(a,'GET /friends/help')).entries).toEqual([]);
+    expect((await f.api(a,'GET /friends/help')).entries).toEqual([helperBotTarget]);
     const {entries} = await f.unread();
     expect(entries).toHaveLength(2);
     await f.api(b,'POST /friends/help/read',{}, {eventId:first.event.eventId});
@@ -322,7 +340,7 @@ describe('Friend help cycle', () => {
     const f = await helpFixture(1);
     const elapsed = hours * 60 * 60 * 1000;
     f.tick(elapsed);
-    expect((await f.api(a,'GET /friends/help')).entries).toMatchObject([{targetId:b,damagedBuildingCount:1}]);
+    expect((await f.api(a,'GET /friends/help')).entries).toMatchObject([{targetId:b,damagedBuildingCount:1}, helperBotTarget]);
     expect((await f.visit()).repairs).toMatchObject([{eligible:true}]);
     const {event} = await f.repair();
     expect(event.occurredAt).toBe(new Date(today + elapsed).toISOString());
@@ -342,17 +360,17 @@ describe('Friend help cycle', () => {
     f.tick(7 * 24 * 60 * 60 * 1000);
     updateDamage({...damage,buildings:{'building-1':'2'}});
     expect((await f.visit()).repairs).toMatchObject([{attackId:'2',eligible:false,cost:first.event.remainingCost}]);
-    expect((await f.api(a,'GET /friends/help')).entries).toEqual([]);
+    expect((await f.api(a,'GET /friends/help')).entries).toEqual([helperBotTarget]);
     await expect(f.repair()).rejects.toMatchObject({code:'NO_HELP_ELIGIBLE_DAMAGE'});
     expect((await f.unread()).entries).toHaveLength(1);
 
     updateDamage(undefined);
-    expect((await f.api(a,'GET /friends/help')).entries).toEqual([]);
+    expect((await f.api(a,'GET /friends/help')).entries).toEqual([helperBotTarget]);
     expect((await f.visit()).repairs).toEqual([]);
     await expect(f.repair()).rejects.toMatchObject({code:'NO_HELP_ELIGIBLE_DAMAGE'});
 
     updateDamage({worldRunId:damage.worldRunId,village:damage.village,buildings:{'building-1':'3'}});
-    expect((await f.api(a,'GET /friends/help')).entries).toMatchObject([{damagedBuildingCount:1}]);
+    expect((await f.api(a,'GET /friends/help')).entries).toMatchObject([{damagedBuildingCount:1}, helperBotTarget]);
     expect((await f.visit()).repairs).toMatchObject([{attackId:'3',eligible:true}]);
     const second = await f.repair();
     expect(second.event).toMatchObject({attackId:'3',savedYP:first.event.savedYP});

@@ -8,7 +8,7 @@ import { currentVillageDamage, type Principal } from './model.js';
 import { ApiError, decodeProgress, playerKey, type PlayerRepository } from './repository.js';
 import { canHelpDamage, buildingIds } from './world-config.js';
 import { friendsRankQuery, type FriendsRankingService } from './friends-ranking.js';
-import type { FriendHelpService } from './friend-help.js';
+import { helperBotTarget, type FriendHelpService } from './friend-help.js';
 import type { FriendsStore, Item, Write } from './friends-store.js';
 
 const alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -211,7 +211,7 @@ export class FriendsService {
       if (damagedBuildingCount > 0) return { ...await this.profile(other), targetId: other, damagedBuildingCount };
     }));
     return {
-      entries: entries.filter(entry => entry !== undefined),
+      entries: [...entries.filter(entry => entry !== undefined), ...(!cursor && this.friendHelp ? [helperBotTarget] : [])],
       nextCursor: rows.length > limit ? rows[limit - 1]!.SK.slice(prefix.length) : null,
     };
   }

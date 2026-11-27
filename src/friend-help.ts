@@ -1,8 +1,9 @@
 import { activityExpiry, activityDisplayUntil, loadActivityPolicy, type ActivityPolicy } from './activity-policy.js';
 import { randomInt, randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { DEFAULT_BOTS } from './bots-config.js';
 import { recharge } from './drop-economy.js';
-import type { FriendsStore, Item, Key } from './friends-store.js';
+import type { FriendsStore, Item, Key, Write } from './friends-store.js';
 import type { ConfigSource } from './game-config.js';
 import { activityPartition, journeyReadKeys } from './journey-read-keys.js';
 import { currentVillageDamage, type Progress } from './model.js';
@@ -10,7 +11,12 @@ import { ApiError, decodeProgress, decodeWallet, encodeProgress, encodeWallet, p
 import { canHelpDamage, loadWorldCatalog, villageRepairCost, type WorldCatalog } from './world-config.js';
 
 const eventInput = z.strictObject({ eventId: z.uuid() });
-const visitInput = z.strictObject({ targetId: z.uuid() });
+const helperBot = DEFAULT_BOTS.bots[0]!;
+export const helperBotTarget = {
+  targetId: `bot-${helperBot.id}`, code: `bot-${helperBot.id}`,
+  nickname: helperBot.id, avatarId: helperBot.avatarId, type: 'BOT', damagedBuildingCount: 3,
+} as const;
+const visitInput = z.strictObject({ targetId: z.union([z.uuid(), z.literal(helperBotTarget.targetId)]) });
 const helpInput = visitInput.extend({ requestId: z.uuid() });
 const interval = 4 * 60 * 60 * 1000;
 const capacity = 5;
@@ -108,7 +114,25 @@ export class FriendHelpService {
     return { clover: cloverState(row, now), serverTime: new Date(now).toISOString() };
   }
 
+  private async botVillage(player: string) {
+    const [catalog, row] = await Promise.all([this.catalog(), this.store.get(playerKey(player, 'PROGRESS'))]);
+    const progress = row ? decodeProgress(row) : null;
+    const world = catalog.worlds.find(entry => entry.id === progress?.worldId) ?? catalog.worlds[0]!;
+    const repairs = world.buildings.slice(0, helperBotTarget.damagedBuildingCount).map(building => ({
+      buildingId: building.id, attackId: `help-bot:${building.id}`,
+      cost: Math.ceil((building.levels[1]?.upgradeCost ?? 0) / 2), name: building.displayName,
+      eligible: true, levelBefore: 3,
+    }));
+    return { world, levels: [2, 2, 2, 3, 3], worldRunId: helperBotTarget.targetId,
+      village: progress?.village ?? 1, repairs };
+  }
+
   private async visit(player: string, targetId: string) {
+    if (targetId === helperBotTarget.targetId) {
+      const [village, balance] = await Promise.all([this.botVillage(player), this.clover(player)]);
+      const { targetId: id, type, nickname, avatarId } = helperBotTarget;
+      return { ...village, friend: {id, type, nickname, avatarId}, equippedCostume: {}, ...balance };
+    }
     const target = await this.target(player, targetId);
     const [village, friend, balance, costume] = await Promise.all([this.village(target.progress), this.party(targetId),
       this.clover(player), this.store.get(playerKey(targetId, 'COSTUME'))]);
@@ -126,11 +150,10 @@ export class FriendHelpService {
         if (receipt.targetId !== targetId) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT');
         return receipt.result;
       }
-      const target = await this.target(player, targetId);
-      const { progress } = target;
+      const target = targetId === helperBotTarget.targetId ? null : await this.target(player, targetId);
       const now = this.clock(), occurredAt = new Date(now).toISOString();
       const [village, row, sender, storedWallet] = await Promise.all([
-        this.village(progress), this.store.get(cloverKey), this.party(player), this.store.get(walletKey),
+        target ? this.village(target.progress) : this.botVillage(player), this.store.get(cloverKey), this.party(player), this.store.get(walletKey),
       ]);
       const eligible = village.repairs.filter(repair => repair.eligible);
       const current = cloverState(row, now);
@@ -149,21 +172,28 @@ export class FriendHelpService {
       const savedYP = Math.min(selected.cost, Math.max(1, Math.floor(selected.cost * percent / 100)));
       const clover = cloverState({ ...cloverKey, remaining: current.remaining - 1, anchor: current.anchor ?? now }, now);
       const event = { eventId: randomUUID(), type: 'FRIEND_HELP_REPAIR', occurredAt, sender, recipientId: targetId,
-        buildingId: selected.buildingId, attackId: selected.attackId, worldRunId: progress.worldRunId, buildingName: selected.name, worldId: progress.worldId, percent, savedYP,
+        buildingId: selected.buildingId, attackId: selected.attackId, worldRunId: village.worldRunId, buildingName: selected.name, worldId: village.world.id, percent, savedYP,
         remainingCost: selected.cost - savedYP, thanked: false };
       const result = { event, clover, serverTime: occurredAt, energyReward: percent };
-      const version = progress.version++;
-      progress.updatedAt = occurredAt;
-      const damage = progress.villageDamage!;
-      damage.help = { ...damage.help, [selected.buildingId]: { attackId: selected.attackId, savedYP } };
+      const recipientWrites: Write[] = [];
+      if (target) {
+        const { progress } = target;
+        const version = progress.version++;
+        progress.updatedAt = occurredAt;
+        const damage = progress.villageDamage!;
+        damage.help = { ...damage.help, [selected.buildingId]: { attackId: selected.attackId, savedYP } };
+        recipientWrites.push(
+          { check: target.key, expected: target.revision },
+          { item: { ...playerKey(targetId, 'PROGRESS'), ...encodeProgress(progress),
+            ...journeyReadKeys(targetId, 'PROGRESS', progress) }, expected: version },
+          { item: indexedEvent(targetId, helpPrefix, event, this.activityPolicy), expected: null },
+          { item: { ...playerKey(targetId, unreadPrefix + event.eventId), event }, expected: null },
+        );
+      }
       if (await this.store.commit([
-        { check: target.key, expected: target.revision },
+        ...recipientWrites,
         { item: { ...cloverKey, remaining: clover.remaining, anchor: clover.anchor, version: Number(row?.version ?? 0) + 1 },
           expected: row ? Number(row.version) : null },
-        { item: { ...playerKey(targetId, 'PROGRESS'), ...encodeProgress(progress),
-          ...journeyReadKeys(targetId, 'PROGRESS', progress) }, expected: version },
-        { item: indexedEvent(targetId, helpPrefix, event, this.activityPolicy), expected: null },
-        { item: { ...playerKey(targetId, unreadPrefix + event.eventId), event }, expected: null },
         { item: { ...walletKey, ...encodeWallet(wallet) }, expected: walletVersion },
         { item: { ...receiptKey, targetId, result }, expected: null },
       ])) return result;

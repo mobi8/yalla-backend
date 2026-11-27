@@ -76,6 +76,8 @@ describe('World economy and one-way progress',()=>{
   expect(await worker.execute(player)).toBe(false);
   const repair={...await f.cmd(),buildingId:'building-1' as const,attackId:'1'};
   const results=await Promise.all([f.service.execute(principal,'repair',repair),f.service.execute(principal,'repair',repair)]);
+  for(const result of results)
+   expect(result.bingo.missions.find(m=>m.missionId==='Upgrade')).toMatchObject({progress:1,completed:true});
   for(const result of results){
    expect(result.worldState.levels).toEqual([3,1,1,1,1]);
    expect(result.worldState.repairs).toEqual([]);

@@ -227,7 +227,7 @@ export class DropService {
       receipt.value.configVersion = `${collectionConfig.version}:${journeyConfig.version}`;
       const match = r.prediction === input.actual.color;
       const events: { type: BingoEvent; multiplier?: number }[] = [
-        { type: 'Play' }, { type: 'Multiplier', multiplier: result.reward.multiplier },
+        { type: 'Play' }, { type: 'Multiplier', multiplier: r.energyCost },
       ];
       if (match && input.actual.color === 'RED') events.push({ type: 'RedMatch' });
       if (match && input.actual.color === 'BLUE') events.push({ type: 'BlueMatch' });

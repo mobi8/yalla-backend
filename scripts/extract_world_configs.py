@@ -25,7 +25,7 @@ worlds=[];rewards=[]
 for n,id in enumerate(ids,1):
  thumbnail=key(thumbs[id])if n<=7 else key(previews[n]['thumbnail'])if n<=30 else hidden
  worlds.append({'id':id,'order':n,'displayName':names[n-1]if n<=7 else previews[n]['displayName']if n<=30 else f'World {n}',
- 'enabled':n<=7,'contentState':'READY'if n<=7 else 'PLANNED','objectSetKey':id if n<=7 else None,'backgroundAssetKey':sets[id]['backgroundAssetKey']if n<=7 else sets['dunes']['backgroundAssetKey'],
+ 'enabled':n<=7,'contentState':'READY'if n<=7 else 'PLANNED','objectSetKey':id if id in sets else None,'backgroundAssetKey':sets.get(id,sets['dunes'])['backgroundAssetKey'],
  'thumbnailAssetKey':thumbnail,'fallbackAssetKey':hidden,'fallbackObjectSetKey':'dunes','unlockAfterWorldId':ids[n-2]if n>1 else None,
  'nextWorldId':ids[n]if n<100 else None,'completionCondition':'ALL_BUILDINGS_MAX','rewardKey':id,'overrides':{}})
  rewards.append({'worldId':id,'confirmed':n<=7,'completionRewards':[{'type':'YALLA_POINT','amount':100}]if n<=7 else []})

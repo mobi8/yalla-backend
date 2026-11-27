@@ -106,7 +106,22 @@ describe('drop transaction lifecycle', () => {
     expect([...f.items.keys()].filter(k => k.startsWith('ECONOMY#CAUSE#settle:'))).toHaveLength(1);
     const settled = await f.service.round(principal, sid, rid);
     expect(settled.round.status).toBe('SETTLED');
-    expect(settled.bingo.missions.filter(m => m.completed).map(m => m.missionId)).toEqual(['Play']);
+    expect(settled.bingo.missions.filter(m => m.completed).map(m => m.missionId)).toEqual(['Play', 'Multiplier']);
+  });
+  it.each([2, 3])('counts the committed ×%i energy setting, independent of color wins and play count', async energyCost => {
+    const f = fixture(), sid = (await f.service.open(principal)).session!.sessionId;
+    const mission = (state: Awaited<ReturnType<typeof f.service.submit>>) =>
+      state.bingo.missions.find(m => m.missionId === 'Multiplier');
+    const play = async (requestId: string, cost: number, color: 'RED' | 'BLUE') => {
+      const round = await f.service.begin(principal, sid, { ...input(requestId), energyCost: cost });
+      return f.service.submit(principal, sid, round.round!.roundId, {
+        requestId, actual: { ...actual, color }, physicsVersion: assigned.physicsVersion,
+      });
+    };
+    expect(mission(await play(input().requestId, 1, 'RED'))).toMatchObject({progress: 0, completed: false});
+    expect(mission(await play('22222222-2222-4222-8222-222222222222', 1, 'RED'))).toMatchObject({progress: 0, completed: false});
+    expect(mission(await play('33333333-3333-4333-8333-333333333333', energyCost, 'BLUE')))
+      .toMatchObject({progress: 1, completed: true});
   });
   it('prevents new pending rounds, input changes, cross-player calls and changed result replays', async () => {
     const f = fixture(), sid = (await f.service.open(principal)).session!.sessionId;

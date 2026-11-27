@@ -143,7 +143,6 @@ export class WorldService {
     if(p.facilityLevels[index]!==command.expectedLevel)throw new ApiError(409,'STALE_BUILDING_LEVEL');
     if(w.yallaPoint<intent.cost)throw new ApiError(409,'INSUFFICIENT_YALLA_POINT');
     w.yallaPoint-=intent.cost;p.facilityLevels[index]!++;p.constructionStars=String(BigInt(p.constructionStars)+1n);
-    extras.push(...await this.drops.bingoRecord(player,now,[{type:'Upgrade'}]));
     result={...result,buildingId:command.buildingId,fromLevel:command.expectedLevel,toLevel:command.expectedLevel+1,cost:intent.cost};
     extras.push({sk:`WORLD#${p.worldId}`,value:{...current.value,...meta(now,(current.stored?.version??0)+1),levels:[...p.facilityLevels]},expectedVersion:current.stored?.version});
    }else if(type==='repair'){
@@ -195,6 +194,7 @@ export class WorldService {
 
     extras.push({sk:`WORLD#${p.worldId}`,value:{...meta(now,(existing?.version??0)+1),worldId:p.worldId,levels:[1,1,1,1,1],status:'ACTIVE',rewardClaimed:false,completionRewards:[]},expectedVersion:existing?.version});
    }
+   if(type==='upgrade'||type==='repair')extras.push(...await this.drops.bingoRecord(player,now,[{type:'Upgrade'}]));
    p.version++;p.updatedAt=now;progressSchema.parse(p);
    w.version++;w.updatedAt=now;walletSchema.parse(w);
    const operationId=`world:${input.requestId}`,causeKey=type==='complete'?`world-complete:${input.worldId}`:`world-${type}:${input.requestId}`;
