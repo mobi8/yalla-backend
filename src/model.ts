@@ -1,9 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
-import { worldIds } from './world-ids.js';
+import { worldIdSchema, worldIndex } from './world-ids.js';
 import { buildingIds } from './world-config.js';
-export const worlds = worldIds;
 const int = z.number().int().min(0).max(2147483647);
 // C# long and decimal must never pass through a JavaScript Number.
 export const longString = z.string().regex(/^(0|[1-9]\d*)$/).refine(v =>
@@ -21,7 +20,7 @@ export const profileSchema = z.strictObject({
   migrationState: z.literal('new'),
 });
 export const progressSchema = z.strictObject({
-  ...state, worldId: z.enum(worlds), village: z.number().int().min(1).max(5),
+  ...state, worldId: worldIdSchema, village: z.number().int().min(1).max(5),
   facilityLevels: z.array(z.number().int().min(1).max(5)).length(5),
   worldRunId: z.string().min(1), worldRunComplete: z.boolean(),
   villageDamage: z.strictObject({
@@ -30,11 +29,11 @@ export const progressSchema = z.strictObject({
     levelsBefore: z.partialRecord(z.enum(buildingIds), z.number().int().min(2).max(5)).optional(),
     buildings: z.partialRecord(z.enum(buildingIds), z.string().regex(/^\d+$/)),
   }).optional(),
-  worldCompletionCounts: z.partialRecord(z.enum(worlds), int),
-  highestUnlockedWorld: z.number().int().min(0).max(99),
+  worldCompletionCounts: z.partialRecord(worldIdSchema, int),
+  highestUnlockedWorld: int,
   distance: decimalString, lastDistanceMilestone: longString, constructionStars: longString,
 }).superRefine((p, ctx) => {
-  if (p.highestUnlockedWorld < worlds.indexOf(p.worldId)) ctx.addIssue({ code: 'custom', message: 'World is locked' });
+  if (p.highestUnlockedWorld < worldIndex(p.worldId)) ctx.addIssue({ code: 'custom', message: 'World is locked' });
   if (p.worldRunComplete && (p.facilityLevels.some(v => v !== 5) || !(p.worldCompletionCounts[p.worldId]! > 0)))
     ctx.addIssue({ code: 'custom', message: 'Invalid completed World checkpoint' });
 });

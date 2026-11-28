@@ -3,6 +3,8 @@ import argparse,json,subprocess
 from pathlib import Path
 p=argparse.ArgumentParser();p.add_argument('--name',required=True,choices=['bingo','collection','journey','jackpot','raid','world','world-buildings','world-rewards']);p.add_argument('--profile',required=True);p.add_argument('--region',default='ap-south-1');p.add_argument('--replace-etag',help='Explicit optimistic replacement; increment JSON version first')
 a=p.parse_args();root=Path(__file__).resolve().parents[1];source=root/'config/dev'/(a.name+'.json')
+if a.name in ('world','world-buildings','world-rewards'):
+ subprocess.run(['python3',str(root/'scripts/sync_world_playability.py'),'--check'],cwd=root,check=True)
 code="import {parseConfig} from './dist/game-config.js';import{readFileSync}from'node:fs';const c=parseConfig(process.argv[1],readFileSync(process.argv[2],'utf8'),'dev');console.log(JSON.stringify({version:c.version,hash:c.contentHash}));"
 info=json.loads(subprocess.check_output(['node','--input-type=module','-e',code,a.name,str(source)],cwd=root,text=True))
 args=['aws','s3api','put-object','--bucket','yalla-result-pools-533266967583','--key','game-config/dev/v1/'+a.name+'.json','--body',str(source),'--content-type','application/json','--server-side-encryption','AES256','--metadata','config-version='+info['version'],'--profile',a.profile,'--region',a.region]

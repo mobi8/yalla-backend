@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "environment": "dev",
-  "version": "world-buildings-v1",
+  "version": "world-buildings-v2",
   "data": {
-    "releaseId": "world-bundle-v1",
+    "releaseId": "world-bundle-v2",
     "defaults": {
       "initialLevel": 1,
       "maxLevel": 5,

@@ -1,9 +1,9 @@
 import {describe,it,expect} from 'vitest';
 import {readFileSync} from 'node:fs';
 import {randomUUID} from 'node:crypto';
-import {newSave,type Save,type Principal,worlds,progressSchema} from '../src/model.js';
+import {newSave,type Save,type Principal,progressSchema} from '../src/model.js';
 import {parseConfig,type ConfigName,type ConfigSource} from '../src/game-config.js';
-import {loadWorldCatalog} from '../src/world-config.js';
+import {loadWorldCatalog,worldConfigSchema,worldRewardsSchema} from '../src/world-config.js';
 import {WorldService} from '../src/world.js';
 import {IncomingRaidService,newIncomingSchedule} from '../src/incoming-raid.js';
 import {DEFAULT_BOTS} from '../src/bots-config.js';
@@ -13,11 +13,12 @@ import type {PlayerRepository} from '../src/repository.js';
 process.env.ENVIRONMENT='dev';process.env.RESULT_POLICY='PERMISSIVE';
 const principal:Principal={provider:'guest',subject:'owner'};
 const read=<K extends ConfigName>(name:K)=>parseConfig(name,readFileSync(new URL(`../config/dev/${name}.json`,import.meta.url),'utf8'),'dev');
+const worlds=read('world').data.worlds.map(world=>world.id);
 async function fixture(world=1,allReady=false){
  const save=newSave('2026-11-17T00:00:00Z');save.wallet.yallaPoint=1000;save.progress.worldId=worlds[world-1]!;save.progress.highestUnlockedWorld=world-1;
  const items=new Map<string,any>([['PROFILE',save.profile],['PROGRESS',save.progress],['WALLET',save.wallet]]);
  const live=new Map<ConfigName,any>(Object.keys((await import('../src/game-config.js')).configSchemas).map(k=>[k as ConfigName,read(k as ConfigName)]));
- if(allReady){for(const w of live.get('world').data.worlds){w.enabled=true;w.contentState='READY';w.objectSetKey??='dunes';}for(const r of live.get('world-rewards').data.worlds)r.confirmed=true;}
+ if(allReady){for(const w of live.get('world').data.worlds){w.enabled=true;w.contentState='READY';w.objectSetKey??='dunes';w.thumbnailAssetKey='fixture-thumbnail';}for(const r of live.get('world-rewards').data.worlds)r.confirmed=true;}
  const configs:ConfigSource={load:async name=>structuredClone(live.get(name))};
  const db:BonusStore={get:async(p,sk)=>p===save.profile.playerId?structuredClone(items.get(sk)):undefined,
  list:async(_p,prefix)=>[...items].filter(([k])=>k.startsWith(prefix)).map(([k,v])=>({...structuredClone(v),_key:k})),
@@ -25,7 +26,8 @@ async function fixture(world=1,allReady=false){
  const players:PlayerRepository={find:async p=>p.subject==='owner'?save.profile.playerId:undefined,read:async()=>structuredClone({profile:items.get('PROFILE'),wallet:items.get('WALLET'),progress:items.get('PROGRESS')}) as Save,create:async()=>{}};
  const drops=new DropService(players,db,{pick:async()=>{throw new Error();}},()=>Date.parse(save.wallet.updatedAt),undefined,configs);
  await drops.open(principal);
- const service=new WorldService(players,db,drops,configs,()=>Date.parse(save.wallet.updatedAt));
+ const service=new WorldService(players,db,drops,configs,()=>Date.parse(save.wallet.updatedAt),
+  {load:async()=>structuredClone(DEFAULT_BOTS)});
  const cmd=async(id=items.get('PROGRESS').worldId)=>({requestId:randomUUID(),worldId:id,configRevision:(await service.state(principal)).catalog.revision});
  return{service,items,configs,live,db,cmd};
 }
@@ -34,7 +36,7 @@ describe('World 100 catalog and compatibility',()=>{
   const f=await fixture(),s=await f.service.state(principal);
   expect(s.catalog.worlds).toHaveLength(100);expect(s.catalog.worlds.slice(0,7).map(w=>w.id)).toEqual(['dunes','canyon','oasis','bazaar','palace','nightcity','goldentemple']);
   expect(s.currentWorld.buildings).toHaveLength(5);expect(s.currentWorld.buildings.every(b=>b.levels.length===5)).toBe(true);
-  expect(s.catalog.worlds.filter(w=>w.playable)).toHaveLength(7);expect(s.worldState.levels).toEqual([1,1,1,1,1]);
+  expect(s.catalog.worlds.filter(w=>w.playable)).toHaveLength(15);expect(s.worldState.levels).toEqual([1,1,1,1,1]);
   expect(s.catalog.worlds[30]!.thumbnailAssetKey).toBe(s.catalog.worlds[30]!.fallbackAssetKey);
   expect([...f.items.keys()].filter(k=>k.startsWith('WORLD#'))).toHaveLength(0);
  });
@@ -187,7 +189,7 @@ describe('World economy and one-way progress',()=>{
   await expect(f.service.execute(principal,'upgrade',{...command,requestId:randomUUID(),expectedLevel:5})).rejects.toMatchObject({code:'BUILDING_MAX'});
   f.items.get('PROGRESS').facilityLevels[0]=2;await expect(f.service.execute(principal,'upgrade',{...command,requestId:randomUUID()})).rejects.toMatchObject({code:'STALE_BUILDING_LEVEL'});
   await expect(f.service.state({...principal,subject:'other'})).rejects.toMatchObject({code:'PLAYER_NOT_FOUND'});
-  await expect(f.service.execute(principal,'select',await f.cmd('world-008'))).rejects.toMatchObject({code:'WORLD_DISABLED'});
+  await expect(f.service.execute(principal,'select',await f.cmd('world-016'))).rejects.toMatchObject({code:'WORLD_DISABLED'});
  });
  it('supports distinct multiple currency rewards only in test fixtures, never invents live future rewards',async()=>{
   const f=await fixture();f.items.get('PROGRESS').facilityLevels=[5,5,5,5,5];
@@ -216,6 +218,53 @@ describe('World economy and one-way progress',()=>{
   f.db.commit=async(p,w)=>{await commit(p,w);if(fail&&w.some(v=>v.sk==='WALLET')){fail=false;const e=new Error();e.name='TimeoutError';throw e;}};
   await expect(f.service.execute(principal,'upgrade',second)).rejects.toMatchObject({name:'TimeoutError'});
   expect((await f.service.execute(principal,'upgrade',second)).save.wallet.yallaPoint).toBe(980);
+ });
+ it('advances the actual dev bundle from World 07 through 15 and blocks 16',async()=>{
+  const f=await fixture(7);
+  const p=f.items.get('PROGRESS');
+  f.items.get('WALLET').yallaPoint=2000;
+  p.worldCompletionCounts=Object.fromEntries(worlds.slice(0,6).map(id=>[id,1]));
+  for(let n=7;n<=15;n++){
+   const id=worlds[n-1]!;
+   for(const buildingId of ['building-1','building-2','building-3','building-4','building-5'] as const)
+    for(let expectedLevel=1;expectedLevel<=4;expectedLevel++)
+     await f.service.execute(principal,'upgrade',{...await f.cmd(),buildingId,expectedLevel});
+   const before=f.items.get('WALLET').yallaPoint;
+   const complete=await f.service.execute(principal,'complete',await f.cmd());
+   const replay=await f.service.execute(principal,'complete',await f.cmd());
+   expect(complete.save.progress).toMatchObject({worldId:id,facilityLevels:[5,5,5,5,5],worldRunComplete:true});
+   expect(complete.save.wallet.yallaPoint).toBe(before+100);
+   expect(replay.save.wallet.yallaPoint).toBe(before+100);
+   expect(complete.save.progress.worldCompletionCounts.dunes).toBe(1);
+   if(n<15){
+    const next=worlds[n]!;
+    const moved=await f.service.execute(principal,'select',await f.cmd(next));
+    expect(moved.save.progress).toMatchObject({worldId:next,facilityLevels:[1,1,1,1,1],worldRunComplete:false});
+    expect(f.items.get('BONUS#STATE').raid.bots.filter((bot: {worldId:string})=>bot.worldId===next)).toHaveLength(10);
+   }
+  }
+  await expect(f.service.execute(principal,'select',await f.cmd('world-016'))).rejects.toMatchObject({code:'WORLD_DISABLED'});
+  expect((await f.service.state(principal)).save.progress).toMatchObject({worldId:'world-015',worldRunComplete:true});
+ });
+ it('resumes an already completed World 07 without a second reward',async()=>{
+  const f=await fixture(7),p=f.items.get('PROGRESS');
+  Object.assign(p,{facilityLevels:[5,5,5,5,5],worldRunComplete:true,worldCompletionCounts:{goldentemple:1},highestUnlockedWorld:7});
+  const replay=await f.service.execute(principal,'complete',await f.cmd());
+  expect(replay.save.wallet.yallaPoint).toBe(1000);
+  expect((await f.service.execute(principal,'select',await f.cmd('world-008'))).save.progress.worldId).toBe('world-008');
+ });
+ it('blocks an enabled world when primary art is missing and accepts an extended catalog',async()=>{
+  const f=await fixture();
+  const entries=f.live.get('world').data.worlds;
+  entries[7].backgroundAssetKey=null;
+  expect((await f.service.state(principal)).catalog.worlds[7]).toMatchObject({playable:false,blockedReason:'WORLD_CONTENT_NOT_READY'});
+  entries[99].nextWorldId='world-101';
+  entries.push({...entries[99],id:'world-101',order:101,rewardKey:'world-101',unlockAfterWorldId:'world-100',nextWorldId:null});
+  f.live.get('world-rewards').data.worlds.push({worldId:'world-101',confirmed:false,completionRewards:[]});
+  expect(worldConfigSchema.parse(f.live.get('world').data).worlds).toHaveLength(101);
+  expect(worldRewardsSchema.parse(f.live.get('world-rewards').data).worlds).toHaveLength(101);
+  expect((await loadWorldCatalog(f.configs)).worlds[100]).toMatchObject({id:'world-101',playable:false});
+  expect(progressSchema.parse({...f.items.get('PROGRESS'),worldId:'world-101',highestUnlockedWorld:100}).worldId).toBe('world-101');
  });
  it.each([7,30,99])('handles world %i -> next boundary with explicitly synthetic ready content',async(n)=>{
   const f=await fixture(n,true);f.items.get('PROGRESS').facilityLevels=[5,5,5,5,5];

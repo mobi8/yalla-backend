@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "environment": "dev",
-  "version": "world-rewards-v1",
+  "version": "world-rewards-v2",
   "data": {
-    "releaseId": "world-bundle-v1",
+    "releaseId": "world-bundle-v2",
     "worlds": [
       {
         "worldId": "dunes",
@@ -77,43 +77,83 @@
       },
       {
         "worldId": "world-008",
-        "confirmed": false,
-        "completionRewards": []
+        "confirmed": true,
+        "completionRewards": [
+          {
+            "type": "YALLA_POINT",
+            "amount": 100
+          }
+        ]
       },
       {
         "worldId": "world-009",
-        "confirmed": false,
-        "completionRewards": []
+        "confirmed": true,
+        "completionRewards": [
+          {
+            "type": "YALLA_POINT",
+            "amount": 100
+          }
+        ]
       },
       {
         "worldId": "world-010",
-        "confirmed": false,
-        "completionRewards": []
+        "confirmed": true,
+        "completionRewards": [
+          {
+            "type": "YALLA_POINT",
+            "amount": 100
+          }
+        ]
       },
       {
         "worldId": "world-011",
-        "confirmed": false,
-        "completionRewards": []
+        "confirmed": true,
+        "completionRewards": [
+          {
+            "type": "YALLA_POINT",
+            "amount": 100
+          }
+        ]
       },
       {
         "worldId": "world-012",
-        "confirmed": false,
-        "completionRewards": []
+        "confirmed": true,
+        "completionRewards": [
+          {
+            "type": "YALLA_POINT",
+            "amount": 100
+          }
+        ]
       },
       {
         "worldId": "world-013",
-        "confirmed": false,
-        "completionRewards": []
+        "confirmed": true,
+        "completionRewards": [
+          {
+            "type": "YALLA_POINT",
+            "amount": 100
+          }
+        ]
       },
       {
         "worldId": "world-014",
-        "confirmed": false,
-        "completionRewards": []
+        "confirmed": true,
+        "completionRewards": [
+          {
+            "type": "YALLA_POINT",
+            "amount": 100
+          }
+        ]
       },
       {
         "worldId": "world-015",
-        "confirmed": false,
-        "completionRewards": []
+        "confirmed": true,
+        "completionRewards": [
+          {
+            "type": "YALLA_POINT",
+            "amount": 100
+          }
+        ]
       },
       {
         "worldId": "world-016",

@@ -10,10 +10,10 @@ import { ApiError,type PlayerRepository } from './repository.js';
 import { type DropStore,type Write,DropService,type Session } from './drop.js';
 import { type ConfigSource } from './game-config.js';
 import { loadWorldCatalog,villageRepairCost,buildingIds,type WorldCatalog } from './world-config.js';
-import { worldIds } from './world-ids.js';
+import { worldIdAt, worldIdSchema, worldIndex } from './world-ids.js';
 import { currentVillageDamage,progressSchema,walletSchema,type Principal,type Save } from './model.js';
 type Item=Record<string,any>;
-export const worldCommand=z.strictObject({requestId:z.string().uuid(),worldId:z.enum(worldIds),configRevision:z.string().regex(/^[a-f0-9]{64}$/)});
+export const worldCommand=z.strictObject({requestId:z.string().uuid(),worldId:worldIdSchema,configRevision:z.string().regex(/^[a-f0-9]{64}$/)});
 export const upgradeCommand=worldCommand.extend({buildingId:z.enum(buildingIds),expectedLevel:z.number().int().min(1).max(5)});
 export const repairCommand=worldCommand.extend({buildingId:z.enum(buildingIds),attackId:z.string().regex(/^\d{1,16}$/)});
 type WorldAction='upgrade'|'repair'|'complete'|'select';
@@ -39,15 +39,15 @@ export class WorldService {
   const stored=await this.db.get(player,`WORLD#${p.worldId}`);
   return {stored,value:stored??{...meta(p.updatedAt,0),worldId:p.worldId,levels:[...p.facilityLevels],status:p.worldRunComplete?'COMPLETE':'ACTIVE',rewardClaimed:p.worldRunComplete,completionRewards:[],legacyBaseline:true}};
  }
- private async unlocks(player:string,p:Save['progress']){
+ private async unlocks(player:string,p:Save['progress'],catalogLength:number){
   const stored=await this.db.get(player,'WORLD#UNLOCKS');
-  return {stored,value:stored??{...meta(p.updatedAt,0),worldIds:worldIds.slice(0,p.highestUnlockedWorld+1)}};
+  return {stored,value:stored??{...meta(p.updatedAt,0),worldIds:Array.from({length:Math.min(catalogLength,p.highestUnlockedWorld+1)},(_,index)=>worldIdAt(index))}};
  }
  async state(principal:Principal){
   const player=await this.owner(principal),catalog=await this.catalog();
   for(let i=0;i<5;i++){
    const drop=await this.drops.active(principal),p=drop.save.progress;
-   const current=await this.current(player,p),unlocks=await this.unlocks(player,p);
+   const current=await this.current(player,p),unlocks=await this.unlocks(player,p,catalog.worlds.length);
    const after=(await this.players.read(player))!.progress;if(after.version!==p.version)continue;
    const definition=catalog.worlds.find(w=>w.id===p.worldId)!;
    const damage=currentVillageDamage(p);
@@ -75,7 +75,7 @@ export class WorldService {
   if(old){if(old.requestHash!==requestHash)throw new ApiError(409,'IDEMPOTENCY_CONFLICT');return old;}
   const catalog=await this.catalog();if(catalog.revision!==input.configRevision)throw new ApiError(409,'CONFIG_CHANGED');
   const ctx=await this.context(player),p=ctx.save.progress;
-  const w=catalog.worlds.find(w=>w.id===input.worldId)!;this.playable(w);
+  const w=catalog.worlds.find(w=>w.id===input.worldId);if(!w)throw new ApiError(409,'WORLD_CONTENT_NOT_READY');this.playable(w);
   const current=await this.current(player,p);
   let cost=0;
   if(type==='upgrade'){
@@ -102,11 +102,11 @@ export class WorldService {
    if(!p.worldRunComplete)throw new ApiError(409,'COMPLETE_CURRENT_WORLD_FIRST');
    this.checkUndamaged(p);
    const source=catalog.worlds.find(w=>w.id===p.worldId)!;
-   const unlocks=await this.unlocks(player,p);
+   const unlocks=await this.unlocks(player,p,catalog.worlds.length);
    if(source.nextWorldId!==input.worldId||!unlocks.value.worldIds.includes(input.worldId)||(w.unlockAfterWorldId&&(p.worldCompletionCounts[w.unlockAfterWorldId]??0)<1)||p.worldCompletionCounts[input.worldId])throw new ApiError(409,'WORLD_SELECTION_FORBIDDEN');
   }
   const intent={...meta(this.now()),requestHash,type,input,cost,definition:w,fromWorldId:p.worldId,fromWorldRunId:p.worldRunId,fromVillage:p.village,
-   configVersions:catalog.versions,configHashes:catalog.hashes,catalogRevision:catalog.revision};
+   configVersions:catalog.versions,configHashes:catalog.hashes,catalogRevision:catalog.revision,catalogLength:catalog.worlds.length};
   // Accepted commands retain the exact price/rewards across retries and config updates. No currency mutation yet.
   try{await this.db.commit(player,[{sk:key,value:intent}]);}catch(e){const winner=await this.db.get(player,key);if(!winner)throw e;if(winner.requestHash!==requestHash)throw new ApiError(409,'IDEMPOTENCY_CONFLICT');return winner;}
   return intent;
@@ -130,7 +130,7 @@ export class WorldService {
     if(cause){receipt=await this.db.get(player,`ECONOMY#OP#${cause.operationId}`);return;}
    }
    const ctx=await this.context(player),before=ctx.save,p=structuredClone(before.progress),w=structuredClone(before.wallet),now=this.now();
-   const current=await this.current(player,p),unlock=await this.unlocks(player,p),def=intent.definition as WorldCatalog['worlds'][number];
+   const current=await this.current(player,p),unlock=await this.unlocks(player,p,intent.catalogLength??p.highestUnlockedWorld+1),def=intent.definition as WorldCatalog['worlds'][number];
    if(p.worldId!==intent.fromWorldId||p.worldRunId!==intent.fromWorldRunId||(intent.fromVillage!==undefined&&p.village!==intent.fromVillage))
     throw new ApiError(409,'WORLD_CHECKPOINT_CHANGED');
    const extras:Write[]=[];
@@ -175,7 +175,7 @@ export class WorldService {
     if(w.energy>=50)w.energyRechargeAnchor='0';
     p.worldRunComplete=true;p.worldCompletionCounts[p.worldId]=1;
     const unlocked=[...unlock.value.worldIds];if(def.nextWorldId&&!unlocked.includes(def.nextWorldId))unlocked.push(def.nextWorldId);
-    if(def.nextWorldId)p.highestUnlockedWorld=Math.max(p.highestUnlockedWorld,worldIds.indexOf(def.nextWorldId));
+    if(def.nextWorldId)p.highestUnlockedWorld=Math.max(p.highestUnlockedWorld,worldIndex(def.nextWorldId));
     result={...result,completionRewards:def.completionRewards,nextWorldId:def.nextWorldId};
     extras.push({sk:`WORLD#${p.worldId}`,value:{...current.value,...meta(now,(current.stored?.version??0)+1),levels:[...p.facilityLevels],status:'COMPLETE',rewardClaimed:true,completionRewards:def.completionRewards,completedAt:now,configVersions:intent.configVersions,configHashes:intent.configHashes},expectedVersion:current.stored?.version},
      {sk:'WORLD#UNLOCKS',value:{...meta(now,(unlock.stored?.version??0)+1),worldIds:unlocked},expectedVersion:unlock.stored?.version});
