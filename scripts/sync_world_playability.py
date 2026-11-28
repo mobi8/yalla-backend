@@ -8,7 +8,11 @@ backend = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--unity", type=Path, default=backend.parent / "YallaJourney")
 parser.add_argument("--check", action="store_true", help="Validate without writing the generated asset")
+parser.add_argument("--register-remote", nargs="+", default=[], metavar="WORLD_ID",
+                    help="Generate remote registrations from backend art keys after removing direct references")
 args = parser.parse_args()
+if args.check and args.register_remote:
+    parser.error("--check is read-only")
 
 world, buildings, rewards = [
     json.loads((backend / "config/dev" / f"{name}.json").read_text())["data"]
@@ -19,6 +23,8 @@ assets = args.unity / "Assets"
 drop = assets / "YallaDrop"
 resources = drop / "Resources"
 catalog = (resources / "WorldAssetCatalog.asset").read_text()
+remote_manifest = resources / "MyShelterRemoteWorlds.json"
+remote_worlds = {world["id"]: world for world in json.loads(remote_manifest.read_text())["worlds"]}
 catalog_refs = dict(
     (key, (guid, int(file_id)))
     for key, file_id, guid in re.findall(r"^  - key: (\S+)\n    sprite: \{fileID: (-?\d+), guid: (\w+),", catalog, re.M)
@@ -31,9 +37,14 @@ for path in assets.rglob("*.meta"):
         assert guid not in asset_metas, f"Duplicate asset GUID {guid}"
         asset_metas[guid] = path
 
-def sprite(key):
-    assert key in catalog_refs, f"Missing primary catalog sprite: {key}"
-    guid, file_id = catalog_refs[key]
+def sprite(key, remote=False):
+    if remote:
+        assert key not in catalog_refs, f"Remote sprite is still embedded: {key}"
+        _, guid, file_id = key.split("/")
+        file_id = int(file_id)
+    else:
+        assert key in catalog_refs, f"Missing primary catalog sprite: {key}"
+        guid, file_id = catalog_refs[key]
     assert key == f"sprite/{guid}/{file_id}" and guid in asset_metas, f"Broken sprite reference: {key}"
     settings = asset_metas[guid].read_text()
     if file_id == 21300000:
@@ -66,6 +77,25 @@ reward_by_world = {entry["worldId"]: entry for entry in rewards["worlds"]}
 policy_source = (drop / "Core/Data/ProgressionChestRewards.cs").read_text()
 local_amount = int(re.search(r"\bWorldYallaPoints = (\d+)", policy_source)[1])
 local_policy = [{"type": "YALLA_POINT", "amount": local_amount}]
+def artwork(entry):
+    world_id = entry["id"]
+    art = buildings["objectSets"][entry["overrides"].get("objectSetKey", entry["objectSetKey"])]
+    background = entry["overrides"].get("backgroundAssetKey", entry["backgroundAssetKey"])
+    overrides = buildings["worldOverrides"].get(world_id, {}).get("buildingOverrides", {})
+    stages = []
+    for default in buildings["defaults"]["buildings"]:
+        index = int(default["id"].rsplit("-", 1)[1]) - 1
+        keys = overrides.get(default["id"], {}).get("levelAssetKeys", [None] * 5)
+        stages.extend(keys[level - 1] or art["buildings"][index][default["levels"][level - 1]["spriteSlot"]]
+                      for level in range(2, 6))
+    return background, stages
+
+for world_id in args.register_remote:
+    entry = next((entry for entry in world["worlds"] if entry["id"] == world_id), None)
+    assert entry and world_id != "dunes", f"Unknown or local-only world: {world_id}"
+    background, stages = artwork(entry)
+    remote_worlds[world_id] = {"id": world_id, "background": background, "stages": stages}
+
 rows = []
 
 for entry in sorted(world["worlds"], key=lambda value: value["order"]):
@@ -78,25 +108,28 @@ for entry in sorted(world["worlds"], key=lambda value: value["order"]):
         assert reward["confirmed"] and reward["completionRewards"] == local_policy, (
             f"{world_id}: confirm the existing {local_amount} YP policy or align server/local reward handling first"
         )
-        art = buildings["objectSets"][entry["overrides"].get("objectSetKey", entry["objectSetKey"])]
-        background = sprite(entry["overrides"].get("backgroundAssetKey", entry["backgroundAssetKey"]))
+    remote = remote_worlds.get(world_id)
+    if playable or remote:
+        background_key, stage_keys = artwork(entry)
+        background = sprite(background_key, remote is not None)
         assert entry["thumbnailAssetKey"] != entry["fallbackAssetKey"], f"{world_id}: placeholder thumbnail"
         thumbnail = sprite(entry["thumbnailAssetKey"])
         assert map_refs.get(world_id, map_previews.get(entry["order"])) == thumbnail, f"{world_id}: missing local map thumbnail"
-        assert raid_refs.get(world_id) == background, f"{world_id}: missing Attack/Raid background"
-        overrides = buildings["worldOverrides"].get(world_id, {}).get("buildingOverrides", {})
-        stages = []
-        for default in buildings["defaults"]["buildings"]:
-            index = int(default["id"].rsplit("-", 1)[1]) - 1
-            keys = overrides.get(default["id"], {}).get("levelAssetKeys", [None] * 5)
-            stages.extend(sprite(keys[level - 1] or art["buildings"][index][default["levels"][level - 1]["spriteSlot"]])
-                          for level in range(2, 6))
+        if not remote:
+            assert raid_refs.get(world_id) == background, f"{world_id}: missing Attack/Raid background"
+        stages = [sprite(key, remote is not None) for key in stage_keys]
         assert len(stages) == 20, f"{world_id}: missing building stage artwork"
-        if world_id != "dunes":
+        if remote:
+            assert remote["background"] == background_key and remote["stages"] == stage_keys, f"{world_id}: stale remote addresses"
+            assert world_id not in authored and world_id not in raid_refs, f"{world_id}: remote Scene dependency"
+        elif world_id != "dunes":
             block = authored[world_id]
             refs = [(guid, int(file_id)) for file_id, guid in re.findall(r"\{fileID: (-?\d+), guid: (\w+), type: 3\}", block)]
             assert refs[:21] == [background, *stages], f"{world_id}: runtime and Editor artwork differ"
-        layout = resources / f"MyShelterLayout_{world_id}.asset"
+        layout_dir = drop / "Features/Shelter/Layouts" if remote else resources
+        layout = layout_dir / f"MyShelterLayout_{world_id}.asset"
+        if remote:
+            assert not (resources / layout.name).exists(), f"{world_id}: remote Layout still in Resources"
         layout_data = layout.read_text()
         assert f"m_Script: {{fileID: 11500000, guid: {layout_guid}," in layout_data, f"{world_id}: wrong Layout script"
         assert layout.with_suffix(".asset.meta") in asset_metas.values(), f"{world_id}: missing Layout .meta"
@@ -121,5 +154,7 @@ output = json.dumps({"releaseId": world["releaseId"], "worlds": rows}, ensure_as
 if args.check:
     assert target.read_text() == output, f"{target} is stale. Run {Path(__file__).name}."
 else:
+    if args.register_remote:
+        remote_manifest.write_text(json.dumps({"worlds": list(remote_worlds.values())}, indent=2) + "\n")
     target.write_text(output)
 print(f"{world['releaseId']}: {sum(row['playable'] for row in rows)}/{len(rows)} worlds playable")
